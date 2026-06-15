@@ -19,11 +19,11 @@ export default function DashboardScreen() {
           <View style={styles.headerRow}>
             <View style={styles.avatarRow}>
               <View style={styles.avatar}>
-                <Text style={styles.avatarText}>RM</Text>
+                <Text style={styles.avatarText}>EA</Text>
               </View>
               <View style={{ marginLeft: spacing.sm }}>
-                <Text style={styles.headerName}>Rasel Mondol</Text>
-                <Text style={styles.headerRole}>UI/UX Designer</Text>
+                <Text style={styles.headerName}>Emmanuel S. Ablao</Text>
+                <Text style={styles.headerRole}>IT Specialist</Text>
               </View>
             </View>
             <View style={styles.notifBadge}>
@@ -33,7 +33,7 @@ export default function DashboardScreen() {
           </View>
 
           {/* Date */}
-          <Text style={styles.headerDate}>12 Feb, 2024</Text>
+          <Text style={styles.headerDate}>June 15, 2026</Text>
 
           {/* Working Time Card */}
           <View style={styles.timeCard}>
@@ -47,7 +47,7 @@ export default function DashboardScreen() {
             </View>
             <View style={styles.locationRow}>
               <Ionicons name="location-outline" size={13} color={colors.textMuted} />
-              <Text style={styles.locationText}>Kuwaiti Mosque Rd. Dhaka 1212</Text>
+              <Text style={styles.locationText}>B-3, L-11, South Carolina St.Joyous Heights Subd., Hinapao San Jose, Antipolo City</Text>
             </View>
             <TouchableOpacity style={styles.checkoutBtn}>
               <Ionicons name="time-outline" size={16} color={colors.white} />
@@ -169,7 +169,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center',
     marginBottom: spacing.md,
   },
-  locationText: { fontSize: 12, color: colors.textMuted, marginLeft: 4 },
+  locationText: { fontSize: 12, color: colors.textMuted, marginLeft: 4, textAlign: 'center', width: '80%' },
   checkoutBtn: {
     backgroundColor: colors.primary,
     flexDirection: 'row', alignItems: 'center',

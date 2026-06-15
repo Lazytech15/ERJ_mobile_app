@@ -30,9 +30,9 @@ export default function ProfileScreen() {
             <Text style={styles.avatarText}>RM</Text>
           </View>
           <View style={styles.profileInfo}>
-            <Text style={styles.profileName}>Rasel Mondol</Text>
-            <Text style={styles.profileRole}>UI/UX Designer</Text>
-            <Text style={styles.profileEmail}>rasel@company.com</Text>
+            <Text style={styles.profileName}>Emmanuel S. Ablao</Text>
+            <Text style={styles.profileRole}>IT Specialist</Text>
+            <Text style={styles.profileEmail}>emmanuelablao16@gmail.com</Text>
           </View>
           <TouchableOpacity style={styles.editBtn}>
             <Ionicons name="pencil-outline" size={16} color={colors.primary} />
@@ -71,7 +71,7 @@ export default function ProfileScreen() {
           ))}
         </View>
 
-        <Text style={styles.version}>v1.0.0 • Attendance App</Text>
+        <Text style={styles.version}>v1.0.0 • ERJ Smart Solutions</Text>
       </ScrollView>
     </SafeAreaView>
   );

@@ -97,7 +97,7 @@ export default function AttendanceScreen() {
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
         {tab === 'today' ? (
           <View style={styles.body}>
-            <Text style={styles.date}>12 Feb, 2024</Text>
+            <Text style={styles.date}>June 15, 2026</Text>
 
             {/* Time Card */}
             <View style={styles.timeCard}>
@@ -111,7 +111,7 @@ export default function AttendanceScreen() {
               </View>
               <View style={styles.locationRow}>
                 <Ionicons name="location-outline" size={13} color={colors.textMuted} />
-                <Text style={styles.locationText}>Kuwaiti Mosque Rd. Dhaka 1212</Text>
+                <Text style={styles.locationText}>B-3, L-11, South Carolina St.Joyous Heights Subd., Hinapao San Jose, Antipolo City</Text>
               </View>
             </View>
 
@@ -221,7 +221,7 @@ const styles = StyleSheet.create({
   clockColon: { fontSize: 40, fontWeight: '800', color: colors.text, marginHorizontal: 2 },
   clockAMPM: { fontSize: 24, fontWeight: '700', color: colors.text, marginLeft: 4, alignSelf: 'flex-end', marginBottom: 6 },
   locationRow: { flexDirection: 'row', alignItems: 'center' },
-  locationText: { fontSize: 12, color: colors.textMuted, marginLeft: 4 },
+  locationText: { fontSize: 12, color: colors.textMuted, marginLeft: 4, textAlign: 'center', width: '80%' },
 
   mapContainer: {
     height: 160,

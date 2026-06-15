@@ -4,7 +4,7 @@ import {
   KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons, Entypo } from '@expo/vector-icons';
 import { colors, spacing, radius } from '../theme';
 
 export default function LoginScreen({ navigation }) {
@@ -24,7 +24,7 @@ export default function LoginScreen({ navigation }) {
             <View style={styles.sparkle1} />
             <View style={styles.sparkle2} />
           </View>
-          <Text style={styles.welcomeTitle}>Welcome to HRM</Text>
+          <Text style={styles.welcomeTitle}>Welcome to ERJ</Text>
           <Text style={styles.welcomeSubtitle}>Login to access your account</Text>
         </View>
 
@@ -32,10 +32,10 @@ export default function LoginScreen({ navigation }) {
           {/* Brand */}
           <View style={styles.brandRow}>
             <View style={styles.brandLogo}>
-              <MaterialCommunityIcons name="wallet" size={20} color={colors.primary} />
+              <Entypo name="text-document" size={20} color={colors.primary} />
             </View>
             <View>
-              <Text style={styles.brandName}>BROWN WALLET</Text>
+              <Text style={styles.brandName}>ATTENDANCE MANAGEMENT</Text>
             </View>
           </View>
 
