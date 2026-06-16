@@ -1,16 +1,75 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
-  KeyboardAvoidingView, Platform,
+  KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons, MaterialCommunityIcons, Entypo } from '@expo/vector-icons';
+import { Ionicons, Entypo } from '@expo/vector-icons';
 import { colors, spacing, radius } from '../theme';
+import { getSubscription } from '../util/db';
+import { supabase } from '../util/supabase';
+import { useAuth } from '../context/AuthContext';
 
 export default function LoginScreen({ navigation }) {
   const [id, setId] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const { login } = useAuth();
+
+  const handleSignIn = async () => {
+    const trimmedId = id.trim();
+    const trimmedPassword = password.trim();
+
+    if (!trimmedId || !trimmedPassword) {
+      Alert.alert('Missing Fields', 'Please enter your ID and password.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('accounts')
+        .select('*')
+        .eq('id', trimmedId)
+        .single();
+
+      if (error || !data) {
+        Alert.alert('Login Failed', 'Account not found. Please check your ID.');
+        setLoading(false);
+        return;
+      }
+
+      if (data.password !== trimmedPassword) {
+        Alert.alert('Login Failed', 'Incorrect password.');
+        setLoading(false);
+        return;
+      }
+
+      const account = {
+        email:          data.email,
+        password:       data.password,
+        role:           data.role,
+        name:           data.name,
+        id:             data.id,
+        employeeId:     data.employee_id,
+        subscriptionId: data.subscription_id,
+        createdAt:      data.created_at,
+      };
+
+      let subscription = null;
+      if (account.subscriptionId) {
+        subscription = await getSubscription(account.subscriptionId);
+      }
+
+      login(account, subscription);
+      navigation.replace('Main');
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Something went wrong. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -29,7 +88,6 @@ export default function LoginScreen({ navigation }) {
         </View>
 
         <View style={styles.formSection}>
-          {/* Brand */}
           <View style={styles.brandRow}>
             <View style={styles.brandLogo}>
               <Entypo name="text-document" size={20} color={colors.primary} />
@@ -39,19 +97,18 @@ export default function LoginScreen({ navigation }) {
             </View>
           </View>
 
-          {/* ID Input */}
           <View style={styles.inputGroup}>
             <TextInput
               style={styles.input}
-              placeholder="Enter your ID number"
+              placeholder="Enter your ID / username"
               placeholderTextColor={colors.textMuted}
               value={id}
               onChangeText={setId}
               autoCapitalize="none"
+              autoCorrect={false}
             />
           </View>
 
-          {/* Password Input */}
           <View style={styles.inputGroup}>
             <View style={styles.passwordRow}>
               <TextInput
@@ -77,12 +134,18 @@ export default function LoginScreen({ navigation }) {
             <Text style={styles.forgotText}>Forgot Password?</Text>
           </TouchableOpacity>
 
-          {/* Sign In Button */}
-          <TouchableOpacity style={styles.signInBtn} onPress={() => navigation && navigation.replace && navigation.replace('Main')}>
-            <Text style={styles.signInText}>Sign In</Text>
+          <TouchableOpacity
+            style={[styles.signInBtn, loading && { opacity: 0.7 }]}
+            onPress={handleSignIn}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color={colors.white} />
+            ) : (
+              <Text style={styles.signInText}>Sign In</Text>
+            )}
           </TouchableOpacity>
 
-          {/* Register */}
           <View style={styles.registerRow}>
             <Text style={styles.registerText}>Are you a new user? </Text>
             <TouchableOpacity>
@@ -97,12 +160,9 @@ export default function LoginScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.primary },
-
   heroSection: {
-    flex: 1,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
+    flex: 1, backgroundColor: colors.primary,
+    alignItems: 'center', justifyContent: 'center',
     paddingHorizontal: spacing.xxl,
   },
   checkBadge: {
@@ -123,13 +183,8 @@ const styles = StyleSheet.create({
     width: 6, height: 6, borderRadius: 3,
     backgroundColor: colors.white, opacity: 0.7,
   },
-  welcomeTitle: {
-    fontSize: 26, fontWeight: '800', color: colors.white, marginBottom: spacing.sm,
-  },
-  welcomeSubtitle: {
-    fontSize: 14, color: 'rgba(255,255,255,0.85)',
-  },
-
+  welcomeTitle: { fontSize: 26, fontWeight: '800', color: colors.white, marginBottom: spacing.sm },
+  welcomeSubtitle: { fontSize: 14, color: 'rgba(255,255,255,0.85)' },
   formSection: {
     backgroundColor: colors.white,
     borderTopLeftRadius: radius.xl + 8,
@@ -138,45 +193,28 @@ const styles = StyleSheet.create({
     paddingTop: spacing.xxl,
     paddingBottom: spacing.xxl,
   },
-  brandRow: {
-    flexDirection: 'row', alignItems: 'center',
-    gap: spacing.sm, marginBottom: spacing.xxl,
-  },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xxl },
   brandLogo: {
     width: 36, height: 36, borderRadius: 10,
     backgroundColor: colors.brown,
     justifyContent: 'center', alignItems: 'center',
   },
   brandName: { fontSize: 13, fontWeight: '800', color: colors.brown, letterSpacing: 1 },
-
   inputGroup: { marginBottom: spacing.xl },
   input: {
-    fontSize: 15,
-    color: colors.text,
+    fontSize: 15, color: colors.text,
     paddingVertical: spacing.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
   },
-  passwordRow: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingVertical: spacing.sm,
-  },
-  inputUnderline: {
-    height: 1, backgroundColor: colors.border,
-  },
-
+  passwordRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm },
+  inputUnderline: { height: 1, backgroundColor: colors.border },
   forgotBtn: { alignSelf: 'flex-end', marginBottom: spacing.xxl },
   forgotText: { fontSize: 13, color: colors.primary, fontWeight: '600' },
-
   signInBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingVertical: spacing.lg,
-    alignItems: 'center',
-    marginBottom: spacing.lg,
+    backgroundColor: colors.primary, borderRadius: radius.md,
+    paddingVertical: spacing.lg, alignItems: 'center', marginBottom: spacing.lg,
   },
   signInText: { color: colors.white, fontWeight: '700', fontSize: 15 },
-
   registerRow: { flexDirection: 'row', justifyContent: 'center' },
   registerText: { fontSize: 13, color: colors.textSecondary },
   registerLink: { fontSize: 13, color: colors.primary, fontWeight: '700' },

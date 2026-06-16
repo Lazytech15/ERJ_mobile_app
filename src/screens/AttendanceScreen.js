@@ -1,73 +1,329 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
+  ActivityIndicator, Alert, RefreshControl, Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import * as Location from 'expo-location';
+import MapView, { Marker, Circle } from 'react-native-maps';
 import { colors, spacing, radius } from '../theme';
+import { useAuth } from '../context/AuthContext';
+import { getSubscription, putSubscription } from '../util/db';
+import { supabase } from '../util/supabase';
 
-const attendanceList = [
-  { date: '12 Feb, 2024', day: 'Mon', checkIn: '09:00 AM', checkOut: '06:15 PM', status: 'present' },
-  { date: '11 Feb, 2024', day: 'Sun', checkIn: '09:05 AM', checkOut: '06:00 PM', status: 'late' },
-  { date: '10 Feb, 2024', day: 'Sat', checkIn: '--', checkOut: '--', status: 'absent' },
-  { date: '09 Feb, 2024', day: 'Fri', checkIn: '08:55 AM', checkOut: '06:05 PM', status: 'present' },
-  { date: '08 Feb, 2024', day: 'Thu', checkIn: '09:12 AM', checkOut: '06:30 PM', status: 'late' },
-  { date: '07 Feb, 2024', day: 'Wed', checkIn: '08:50 AM', checkOut: '06:00 PM', status: 'present' },
-];
+// ─── helpers ─────────────────────────────────────────────────────────────────
 
-const statusColors = {
-  present: colors.present,
-  late: colors.late,
-  absent: colors.absent,
-};
-
-const statusLabels = {
-  present: 'Present',
-  late: 'Late',
-  absent: 'Absent',
-};
-
-// Stylized map: green landscape blocks + road network + location pin
-function FakeMap() {
-  return (
-    <View style={styles.mapContainer}>
-      {/* Base terrain */}
-      <View style={styles.mapBase} />
-
-      {/* Green landscape patches */}
-      <View style={[styles.mapPatch, { top: 10, left: 12, width: 70, height: 50 }]} />
-      <View style={[styles.mapPatch, { top: 70, left: 90, width: 90, height: 70 }]} />
-      <View style={[styles.mapPatch, { top: 5, right: 15, width: 60, height: 40 }]} />
-      <View style={[styles.mapPatch, { bottom: 10, left: 20, width: 80, height: 45 }]} />
-      <View style={[styles.mapPatch, { bottom: 15, right: 10, width: 55, height: 55 }]} />
-
-      {/* Road network */}
-      <View style={[styles.roadH, { top: 40 }]} />
-      <View style={[styles.roadH, { top: 95 }]} />
-      <View style={[styles.roadV, { left: 60 }]} />
-      <View style={[styles.roadV, { left: 180 }]} />
-      <View style={styles.roadDiag} />
-
-      {/* Buildings */}
-      <View style={[styles.building, { top: 50, left: 100, width: 24, height: 18 }]} />
-      <View style={[styles.building, { top: 55, left: 130, width: 18, height: 14 }]} />
-      <View style={[styles.building, { top: 105, left: 30, width: 20, height: 16 }]} />
-
-      {/* Pin */}
-      <View style={styles.pinContainer}>
-        <View style={styles.pinOuter}>
-          <View style={styles.pinInner}>
-            <Ionicons name="location" size={18} color={colors.purple} />
-          </View>
-        </View>
-      </View>
-    </View>
-  );
+function todayKey() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm   = String(d.getMonth() + 1).padStart(2, '0');
+  const dd   = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
 }
 
+function toDateKey(val) {
+  if (!val) return '';
+  if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}/.test(val)) return val.slice(0, 10);
+  const d = new Date(val);
+  if (!Number.isNaN(d.getTime())) {
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  }
+  return String(val).slice(0, 10);
+}
+
+// Normalize a raw record (web schema: clockIn/clockOut/notes, or legacy
+// mobile schema: checkIn/checkOut/check_in/...) into one shape the screen uses.
+function normalizeRecord(r) {
+  return {
+    id:         r.id         ?? null,
+    employeeId: r.employeeId ?? r.employee_id ?? r.empId ?? r.emp_id ?? '',
+    date:       r.date       ?? r.attendanceDate ?? r.attendance_date ?? r.day ?? '',
+    checkIn:    r.clockIn    ?? r.checkIn    ?? r.check_in  ?? r.timeIn  ?? r.time_in  ?? null,
+    checkOut:   r.clockOut   ?? r.checkOut   ?? r.check_out ?? r.timeOut ?? r.time_out ?? null,
+    status:     (r.status ?? '').toString().toLowerCase(),
+    hours:      r.hours      ?? r.hoursWorked ?? r.hours_worked ?? null,
+    location:   r.location   ?? r.checkInLocation ?? null,
+    notes:      r.notes      ?? '',
+  };
+}
+
+/** "HH:MM" 24h from a Date object */
+function toHHMM(date) {
+  return `${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+}
+
+/** "HH:MM" → "08:00 AM" */
+function fmtTime(val) {
+  if (!val) return '--';
+  const m = String(val).match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return val;
+  const h = parseInt(m[1], 10);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12  = String(h % 12 || 12).padStart(2, '0');
+  return `${h12}:${m[2]} ${ampm}`;
+}
+
+/** Compute hours between two "HH:MM" strings */
+function hoursBetween(checkIn, checkOut) {
+  if (!checkIn || !checkOut) return 0;
+  const rx = /^(\d{1,2}):(\d{2})$/;
+  const a  = String(checkIn).match(rx);
+  const b  = String(checkOut).match(rx);
+  if (a && b) {
+    const diff = (parseInt(b[1],10)*60+parseInt(b[2],10)) - (parseInt(a[1],10)*60+parseInt(a[2],10));
+    return diff > 0 ? diff/60 : 0;
+  }
+  return 0;
+}
+
+/**
+ * Determine attendance status from a "HH:MM" check-in time, using the same
+ * rule as the web app's AttendancePage: compare against the employee's
+ * assigned shift start + the subscription's settings.lateThreshold (minutes).
+ * Falls back to a 09:00 default shift start with a 15 min grace period if
+ * the employee has no assigned shift / no settings are configured, so
+ * behavior stays sane even on subscriptions created before shifts existed.
+ */
+function deriveStatus(checkIn, shiftStart = '09:00', lateThresholdMin = 15) {
+  if (!checkIn) return 'absent';
+  const m = String(checkIn).match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return 'present';
+  const clockMins = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+
+  const sm = String(shiftStart).match(/^(\d{1,2}):(\d{2})/);
+  const shiftMins = sm ? parseInt(sm[1], 10) * 60 + parseInt(sm[2], 10) : 9 * 60;
+
+  return clockMins <= shiftMins + Number(lateThresholdMin || 0) ? 'present' : 'late';
+}
+
+const STATUS_COLORS = { present: colors.present, late: colors.late, absent: colors.absent };
+const STATUS_LABELS = { present: 'Present', late: 'Late', absent: 'Absent' };
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// ─── component ────────────────────────────────────────────────────────────────
+
 export default function AttendanceScreen() {
-  const [tab, setTab] = useState('today');
-  const [checkedIn, setCheckedIn] = useState(false);
+  const { account, subscription, setSubscription } = useAuth();
+  const [tab, setTab]                   = useState('today');
+  const [loading, setLoading]           = useState(true);
+  const [refreshing, setRefreshing]     = useState(false);
+  const [submitting, setSubmitting]     = useState(false);
+  const [todayRecord, setTodayRecord]   = useState(null);
+  const [allRecords, setAllRecords]     = useState([]);
+  const [location, setLocation]         = useState(null);
+  const [locationAddr, setLocationAddr] = useState('');
+  const [locationErr, setLocationErr]   = useState('');
+  const [locLoading, setLocLoading]     = useState(false);
+  const [listMonth, setListMonth]       = useState(new Date().getMonth());
+  const [listYear]                      = useState(new Date().getFullYear());
+  const mapRef = useRef(null);
+
+  const subscriptionId = account?.subscriptionId ?? null;
+  const employeeId     = account?.employeeId     ?? null;
+
+  // The employee's assigned shift + the subscription's late-threshold setting,
+  // so status is computed the exact same way as the web AttendancePage.
+  const employees     = subscription?.enrolledEmployees ?? [];
+  const shifts         = subscription?.shifts ?? [];
+  const lateThreshold  = Number(subscription?.settings?.lateThreshold ?? 15);
+  const myEmployee     = employees.find(e => String(e.id) === String(employeeId));
+  const myShift        = myEmployee?.shiftId
+    ? shifts.find(s => String(s.id) === String(myEmployee.shiftId))
+    : null;
+  const shiftStart     = myShift?.start ?? '09:00';
+
+  // ── fetch data ─────────────────────────────────────────────────────────────
+  const fetchData = useCallback(async () => {
+    if (!subscriptionId || !employeeId) { setLoading(false); return; }
+    try {
+      const sub = await getSubscription(subscriptionId);
+      if (!sub) return;
+      const records = (sub.attendanceRecords ?? [])
+        .map(normalizeRecord)
+        .filter(r => String(r.employeeId).trim() === String(employeeId).trim());
+
+      const tKey = todayKey();
+      const todayRec = records.find(r => toDateKey(r.date) === tKey) ?? null;
+
+      setAllRecords(records);
+      setTodayRecord(todayRec);
+    } catch (err) {
+      console.warn('[Attendance] fetch error:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [subscriptionId, employeeId]);
+
+  useEffect(() => { fetchData(); }, [fetchData, refreshing]);
+
+  const onRefresh = useCallback(() => setRefreshing(true), []);
+
+  // ── request location ───────────────────────────────────────────────────────
+  const requestLocation = useCallback(async () => {
+    setLocLoading(true);
+    setLocationErr('');
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        setLocationErr('Location permission denied. Please enable it in Settings.');
+        setLocLoading(false);
+        return;
+      }
+      const pos = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+      const { latitude, longitude } = pos.coords;
+      setLocation({ latitude, longitude });
+
+      // Reverse geocode
+      const [geo] = await Location.reverseGeocodeAsync({ latitude, longitude });
+      if (geo) {
+        const parts = [geo.name, geo.street, geo.city, geo.region].filter(Boolean);
+        setLocationAddr(parts.join(', '));
+      }
+    } catch (err) {
+      setLocationErr('Could not get location. Please try again.');
+    } finally {
+      setLocLoading(false);
+    }
+  }, []);
+
+  // Ask for location on mount (today tab only)
+  useEffect(() => {
+    if (tab === 'today' && !location) requestLocation();
+  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── clock in / out ─────────────────────────────────────────────────────────
+  const handleClockAction = useCallback(async () => {
+    if (!subscriptionId || !employeeId) {
+      Alert.alert('Error', 'Session expired. Please log in again.');
+      return;
+    }
+    if (!location) {
+      Alert.alert('Location Required', 'We need your location to record attendance. Tap "Use My Location" to allow it.');
+      return;
+    }
+
+    const now      = new Date();
+    const timeStr  = toHHMM(now);
+    const dateStr  = todayKey();
+    const locStr   = locationAddr || `${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}`;
+
+    setSubmitting(true);
+    try {
+      // Fetch latest subscription data
+      const sub = await getSubscription(subscriptionId);
+      if (!sub) throw new Error('Failed to load subscription data.');
+
+      const records = sub.attendanceRecords ?? [];
+
+      if (!todayRecord) {
+        // ── CLOCK IN ────────────────────────────────────────────────────────
+        const status   = deriveStatus(timeStr, shiftStart, lateThreshold);
+        // Same id convention + field names as the web app's addAttendanceRecord,
+        // plus the mobile-only `location` field the web side simply ignores.
+        const newRecord = {
+          id:         `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          employeeId: String(employeeId),
+          date:       dateStr,
+          clockIn:    timeStr,
+          clockOut:   null,
+          status,
+          notes:      '',
+          hours:      null,
+          location:   locStr,
+        };
+        const updatedRecords = [...records, newRecord];
+        const updatedSub     = { ...sub, attendanceRecords: updatedRecords };
+
+        await putSubscription(updatedSub);
+        setSubscription(updatedSub);
+        setTodayRecord(normalizeRecord(newRecord));
+        setAllRecords(prev => [...prev, normalizeRecord(newRecord)]);
+
+        Alert.alert(
+          'Checked In ✓',
+          `Time: ${fmtTime(timeStr)}\nStatus: ${STATUS_LABELS[status]}\nLocation: ${locStr}`,
+        );
+      } else if (!todayRecord.checkOut) {
+        // ── CLOCK OUT ───────────────────────────────────────────────────────
+        const hours = hoursBetween(todayRecord.checkIn, timeStr);
+        const updatedRecord = {
+          ...todayRecord,
+          checkOut: timeStr,
+          hours:    parseFloat(hours.toFixed(2)),
+        };
+
+        const updatedRecords = records.map(r => {
+          const norm = normalizeRecord(r);
+          if (
+            String(norm.employeeId).trim() === String(employeeId).trim() &&
+            toDateKey(norm.date) === dateStr
+          ) {
+            return { ...r, clockOut: timeStr, hours: parseFloat(hours.toFixed(2)) };
+          }
+          return r;
+        });
+
+        const updatedSub = { ...sub, attendanceRecords: updatedRecords };
+        await putSubscription(updatedSub);
+        setSubscription(updatedSub);
+        setTodayRecord(normalizeRecord(updatedRecord));
+        setAllRecords(prev => prev.map(r =>
+          toDateKey(r.date) === dateStr && String(r.employeeId).trim() === String(employeeId).trim()
+            ? normalizeRecord(updatedRecord)
+            : r
+        ));
+
+        Alert.alert(
+          'Checked Out ✓',
+          `Time: ${fmtTime(timeStr)}\nHours worked: ${hours.toFixed(2)} hrs`,
+        );
+      } else {
+        Alert.alert('Already Recorded', 'You have already checked in and out for today.');
+      }
+    } catch (err) {
+      Alert.alert('Error', err.message ?? 'Something went wrong.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [subscriptionId, employeeId, location, locationAddr, todayRecord, setSubscription, shiftStart, lateThreshold]);
+
+  // ── derived list for the selected month ────────────────────────────────────
+  const prefix = `${listYear}-${String(listMonth+1).padStart(2,'0')}`;
+  const listRecords = allRecords
+    .filter(r => toDateKey(r.date).startsWith(prefix))
+    .sort((a, b) => toDateKey(b.date).localeCompare(toDateKey(a.date)));
+
+  // ── button state ───────────────────────────────────────────────────────────
+  const alreadyDone   = !!(todayRecord?.checkIn && todayRecord?.checkOut);
+  const checkedIn     = !!(todayRecord?.checkIn && !todayRecord?.checkOut);
+  const btnColor      = alreadyDone ? colors.textMuted : checkedIn ? colors.absent : colors.present;
+  const btnLabel      = alreadyDone ? 'Done' : checkedIn ? 'Check Out' : 'Check In';
+  const btnIcon       = alreadyDone ? 'checkmark-circle-outline' : 'finger-print-outline';
+
+  // ── format date label ──────────────────────────────────────────────────────
+  const todayLabel = new Date().toLocaleDateString('en-PH', {
+    month: 'long', day: 'numeric', year: 'numeric',
+  });
+
+  function formatRecordDate(dateStr) {
+    const d = new Date(dateStr + 'T00:00:00');
+    return {
+      day:  d.toLocaleDateString('en-US', { weekday: 'short' }),
+      date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    };
+  }
+
+  if (loading) {
+    return (
+      <SafeAreaView style={[styles.safe, styles.center]}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -94,79 +350,215 @@ export default function AttendanceScreen() {
         </View>
       </View>
 
-      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        style={styles.scroll}
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
+      >
+        {/* ── TODAY TAB ────────────────────────────────────────────────── */}
         {tab === 'today' ? (
           <View style={styles.body}>
-            <Text style={styles.date}>June 15, 2026</Text>
+            <Text style={styles.date}>{todayLabel}</Text>
 
             {/* Time Card */}
             <View style={styles.timeCard}>
-              <Text style={styles.timeLabel}>Start Time</Text>
-              <View style={styles.clockRow}>
-                <Text style={styles.clockNum}>09</Text>
-                <Text style={styles.clockColon}>:</Text>
-                <Text style={styles.clockNum}>00</Text>
-                <Text style={styles.clockColon}>:</Text>
-                <Text style={styles.clockAMPM}>PM</Text>
-              </View>
-              <View style={styles.locationRow}>
-                <Ionicons name="location-outline" size={13} color={colors.textMuted} />
-                <Text style={styles.locationText}>B-3, L-11, South Carolina St.Joyous Heights Subd., Hinapao San Jose, Antipolo City</Text>
-              </View>
+              <Text style={styles.timeLabel}>
+                {!todayRecord ? 'Not Yet Checked In' : alreadyDone ? 'Attendance Complete' : 'Checked In'}
+              </Text>
+
+              {todayRecord?.checkIn ? (
+                <View style={styles.checkTimesRow}>
+                  <View style={styles.checkItem}>
+                    <Ionicons name="log-in-outline" size={14} color={colors.present} />
+                    <Text style={styles.checkItemLabel}>In</Text>
+                    <Text style={styles.checkItemValue}>{fmtTime(todayRecord.checkIn)}</Text>
+                  </View>
+                  {todayRecord?.checkOut && (
+                    <View style={styles.checkItem}>
+                      <Ionicons name="log-out-outline" size={14} color={colors.absent} />
+                      <Text style={styles.checkItemLabel}>Out</Text>
+                      <Text style={styles.checkItemValue}>{fmtTime(todayRecord.checkOut)}</Text>
+                    </View>
+                  )}
+                </View>
+              ) : (
+                <View style={styles.clockRow}>
+                  <Text style={styles.clockNum}>--</Text>
+                  <Text style={styles.clockColon}>:</Text>
+                  <Text style={styles.clockNum}>--</Text>
+                </View>
+              )}
+
+              {todayRecord?.location ? (
+                <View style={styles.locationRow}>
+                  <Ionicons name="location-outline" size={13} color={colors.textMuted} />
+                  <Text style={styles.locationText}>{todayRecord.location}</Text>
+                </View>
+              ) : null}
+
+              {todayRecord && (
+                <View style={[styles.statusBadge, { backgroundColor: (STATUS_COLORS[todayRecord.status] ?? colors.textMuted) + '20' }]}>
+                  <Text style={[styles.statusBadgeText, { color: STATUS_COLORS[todayRecord.status] ?? colors.textMuted }]}>
+                    {STATUS_LABELS[todayRecord.status] ?? todayRecord.status}
+                  </Text>
+                </View>
+              )}
             </View>
 
             {/* Map */}
-            <FakeMap />
+            {location ? (
+              <View style={styles.mapContainer}>
+                <MapView
+                  ref={mapRef}
+                  style={styles.map}
+                  initialRegion={{
+                    latitude:       location.latitude,
+                    longitude:      location.longitude,
+                    latitudeDelta:  0.002,
+                    longitudeDelta: 0.002,
+                  }}
+                  showsUserLocation
+                  showsMyLocationButton={false}
+                >
+                  <Marker
+                    coordinate={location}
+                    title="Your Location"
+                    description={locationAddr}
+                  />
+                  <Circle
+                    center={location}
+                    radius={100}
+                    fillColor="rgba(124,58,237,0.1)"
+                    strokeColor="rgba(124,58,237,0.4)"
+                    strokeWidth={1}
+                  />
+                </MapView>
 
-            {/* Check In Button */}
-            <View style={styles.checkInWrapper}>
-              <TouchableOpacity
-                style={[styles.checkInBtn, checkedIn && styles.checkInBtnOut]}
-                onPress={() => setCheckedIn(!checkedIn)}
-              >
-                <Ionicons name="finger-print-outline" size={28} color={colors.white} />
-                <Text style={styles.checkInText}>{checkedIn ? 'Check Out' : 'Check In'}</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Action buttons row */}
-            <View style={styles.actionsRow}>
-              <TouchableOpacity style={styles.actionBtn}>
-                <Ionicons name="refresh-outline" size={20} color={colors.purple} />
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.actionBtn}>
-                <Ionicons name="reload-outline" size={20} color={colors.purple} />
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.actionBtn}>
-                <Ionicons name="time-outline" size={20} color={colors.purple} />
-              </TouchableOpacity>
-            </View>
-          </View>
-        ) : (
-          <View style={styles.listBody}>
-            {attendanceList.map((item, i) => (
-              <View key={i} style={styles.listItem}>
-                <View style={styles.listDate}>
-                  <Text style={styles.listDay}>{item.day}</Text>
-                  <Text style={styles.listDateText}>{item.date}</Text>
-                </View>
-                <View style={styles.listTimes}>
-                  <View style={styles.listTimeRow}>
-                    <Ionicons name="log-in-outline" size={13} color={colors.present} />
-                    <Text style={styles.listTimeText}>{item.checkIn}</Text>
-                  </View>
-                  <View style={styles.listTimeRow}>
-                    <Ionicons name="log-out-outline" size={13} color={colors.absent} />
-                    <Text style={styles.listTimeText}>{item.checkOut}</Text>
-                  </View>
-                </View>
-                <View style={[styles.statusBadge, { backgroundColor: statusColors[item.status] + '20' }]}>
-                  <Text style={[styles.statusText, { color: statusColors[item.status] }]}>
-                    {statusLabels[item.status]}
+                {/* Location overlay bar */}
+                <View style={styles.mapOverlay}>
+                  <Ionicons name="location" size={12} color={colors.purple} />
+                  <Text style={styles.mapOverlayText} numberOfLines={1}>
+                    {locationAddr || `${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}`}
                   </Text>
                 </View>
               </View>
-            ))}
+            ) : (
+              <View style={styles.mapPlaceholder}>
+                {locLoading ? (
+                  <>
+                    <ActivityIndicator color={colors.purple} />
+                    <Text style={styles.mapPlaceholderText}>Getting your location…</Text>
+                  </>
+                ) : (
+                  <>
+                    <Ionicons name="map-outline" size={36} color={colors.textMuted} />
+                    <Text style={styles.mapPlaceholderText}>
+                      {locationErr || 'Location not available'}
+                    </Text>
+                    <TouchableOpacity style={styles.locationBtn} onPress={requestLocation}>
+                      <Ionicons name="locate-outline" size={14} color={colors.white} />
+                      <Text style={styles.locationBtnText}>Use My Location</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            )}
+
+            {/* If there's a location error but we also have a location (re-fetch failed) */}
+            {locationErr && location ? (
+              <Text style={styles.locErrText}>{locationErr}</Text>
+            ) : null}
+
+            {/* Clock In / Out Button */}
+            <View style={styles.checkInWrapper}>
+              <TouchableOpacity
+                style={[styles.checkInBtn, { backgroundColor: btnColor, shadowColor: btnColor }]}
+                onPress={handleClockAction}
+                disabled={submitting || alreadyDone}
+                activeOpacity={0.8}
+              >
+                {submitting
+                  ? <ActivityIndicator color={colors.white} />
+                  : <Ionicons name={btnIcon} size={28} color={colors.white} />
+                }
+                <Text style={styles.checkInText}>{btnLabel}</Text>
+              </TouchableOpacity>
+
+              {!location && !locLoading && (
+                <TouchableOpacity style={styles.retryLocBtn} onPress={requestLocation}>
+                  <Ionicons name="locate-outline" size={14} color={colors.purple} />
+                  <Text style={styles.retryLocText}>Refresh Location</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        ) : (
+          /* ── LIST TAB ──────────────────────────────────────────────────── */
+          <View style={styles.listBody}>
+            {/* Month selector */}
+            <View style={styles.listMonthRow}>
+              <TouchableOpacity
+                style={styles.monthArrow}
+                onPress={() => setListMonth(m => m === 0 ? 11 : m - 1)}
+              >
+                <Ionicons name="chevron-back" size={16} color={colors.textSecondary} />
+              </TouchableOpacity>
+              <Text style={styles.monthText}>{MONTHS[listMonth]} {listYear}</Text>
+              <TouchableOpacity
+                style={styles.monthArrow}
+                onPress={() => setListMonth(m => m === 11 ? 0 : m + 1)}
+              >
+                <Ionicons name="chevron-forward" size={16} color={colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Summary strip */}
+            {listRecords.length > 0 && (
+              <View style={styles.summaryRow}>
+                {['present','late','absent'].map(s => (
+                  <View key={s} style={styles.summaryItem}>
+                    <Text style={[styles.summaryNum, { color: STATUS_COLORS[s] }]}>
+                      {listRecords.filter(r => r.status === s).length}
+                    </Text>
+                    <Text style={styles.summaryLabel}>{STATUS_LABELS[s]}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {listRecords.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Ionicons name="calendar-outline" size={40} color={colors.textMuted} />
+                <Text style={styles.emptyText}>No attendance records for {MONTHS[listMonth]} {listYear}</Text>
+              </View>
+            ) : (
+              listRecords.map((item, i) => {
+                const { day, date } = formatRecordDate(item.date);
+                return (
+                  <View key={item.id ?? i} style={styles.listItem}>
+                    <View style={styles.listDate}>
+                      <Text style={styles.listDay}>{day}</Text>
+                      <Text style={styles.listDateText}>{date}</Text>
+                    </View>
+                    <View style={styles.listTimes}>
+                      <View style={styles.listTimeRow}>
+                        <Ionicons name="log-in-outline" size={13} color={colors.present} />
+                        <Text style={styles.listTimeText}>{fmtTime(item.checkIn) || '--'}</Text>
+                      </View>
+                      <View style={styles.listTimeRow}>
+                        <Ionicons name="log-out-outline" size={13} color={colors.absent} />
+                        <Text style={styles.listTimeText}>{fmtTime(item.checkOut) || '--'}</Text>
+                      </View>
+                    </View>
+                    <View style={[styles.statusBadge, { backgroundColor: (STATUS_COLORS[item.status] ?? colors.textMuted) + '20' }]}>
+                      <Text style={[styles.statusText, { color: STATUS_COLORS[item.status] ?? colors.textMuted }]}>
+                        {STATUS_LABELS[item.status] ?? item.status}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              })
+            )}
           </View>
         )}
       </ScrollView>
@@ -175,9 +567,11 @@ export default function AttendanceScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.cream },
+  safe:   { flex: 1, backgroundColor: colors.cream },
   scroll: { flex: 1 },
+  center: { justifyContent: 'center', alignItems: 'center' },
 
+  // Header / tabs
   header: {
     backgroundColor: colors.white,
     paddingHorizontal: spacing.xl,
@@ -194,18 +588,16 @@ const styles = StyleSheet.create({
     borderRadius: radius.full,
     padding: 3,
   },
-  tabBtn: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.full,
-  },
-  tabActive: { backgroundColor: colors.primary },
-  tabText: { fontSize: 12, color: colors.textSecondary, fontWeight: '500' },
-  tabTextActive: { color: colors.white, fontWeight: '700' },
+  tabBtn:         { paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderRadius: radius.full },
+  tabActive:      { backgroundColor: colors.primary },
+  tabText:        { fontSize: 12, color: colors.textSecondary, fontWeight: '500' },
+  tabTextActive:  { color: colors.white, fontWeight: '700' },
 
+  // Today body
   body: { padding: spacing.xl },
   date: { fontSize: 14, color: colors.textSecondary, marginBottom: spacing.md },
 
+  // Time card
   timeCard: {
     backgroundColor: colors.white,
     borderRadius: radius.lg,
@@ -215,99 +607,106 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.06, shadowRadius: 8, elevation: 3,
   },
-  timeLabel: { color: colors.textMuted, fontSize: 12, marginBottom: spacing.sm },
-  clockRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm },
-  clockNum: { fontSize: 40, fontWeight: '800', color: colors.text, letterSpacing: 2 },
-  clockColon: { fontSize: 40, fontWeight: '800', color: colors.text, marginHorizontal: 2 },
-  clockAMPM: { fontSize: 24, fontWeight: '700', color: colors.text, marginLeft: 4, alignSelf: 'flex-end', marginBottom: 6 },
-  locationRow: { flexDirection: 'row', alignItems: 'center' },
-  locationText: { fontSize: 12, color: colors.textMuted, marginLeft: 4, textAlign: 'center', width: '80%' },
+  timeLabel:        { color: colors.textMuted, fontSize: 12, marginBottom: spacing.sm },
+  clockRow:         { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm },
+  clockNum:         { fontSize: 40, fontWeight: '800', color: colors.text, letterSpacing: 2 },
+  clockColon:       { fontSize: 40, fontWeight: '800', color: colors.text, marginHorizontal: 2 },
+  checkTimesRow:    { flexDirection: 'row', gap: spacing.xl, marginBottom: spacing.sm },
+  checkItem:        { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  checkItemLabel:   { fontSize: 12, color: colors.textMuted },
+  checkItemValue:   { fontSize: 13, fontWeight: '700', color: colors.text },
+  locationRow:      { flexDirection: 'row', alignItems: 'flex-start', marginBottom: spacing.sm },
+  locationText:     { fontSize: 11, color: colors.textMuted, marginLeft: 4, width: '85%' },
+  statusBadge:      { paddingHorizontal: spacing.sm, paddingVertical: 4, borderRadius: radius.sm, marginTop: spacing.xs },
+  statusBadgeText:  { fontSize: 12, fontWeight: '700' },
 
+  // Map
   mapContainer: {
-    height: 160,
-    backgroundColor: '#EAF4EC',
+    height: 320,
     borderRadius: radius.lg,
     overflow: 'hidden',
     marginBottom: spacing.xl,
-    justifyContent: 'center',
-    alignItems: 'center',
     position: 'relative',
   },
-  mapBase: {
+  map: { width: '100%', height: '100%' },
+  mapOverlay: {
     position: 'absolute',
-    width: '100%', height: '100%',
-    backgroundColor: '#F1F4ED',
+    bottom: 0, left: 0, right: 0,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    gap: 4,
   },
-  mapPatch: {
-    position: 'absolute',
-    backgroundColor: '#CFE8D2',
-    borderRadius: 6,
-  },
-  roadH: {
-    position: 'absolute',
-    left: -10, right: -10,
-    height: 6,
-    backgroundColor: '#FFFFFF',
-  },
-  roadV: {
-    position: 'absolute',
-    top: -10, bottom: -10,
-    width: 6,
-    backgroundColor: '#FFFFFF',
-  },
-  roadDiag: {
-    position: 'absolute',
-    top: -20, left: 100,
-    width: 300,
-    height: 5,
-    backgroundColor: '#FFFFFF',
-    transform: [{ rotate: '35deg' }],
-  },
-  building: {
-    position: 'absolute',
-    backgroundColor: '#E2E5DC',
-    borderRadius: 3,
-    borderWidth: 1,
-    borderColor: '#D7DBCF',
-  },
-  pinContainer: { alignItems: 'center', justifyContent: 'center' },
-  pinOuter: {
-    width: 48, height: 48, borderRadius: 24,
-    backgroundColor: 'rgba(124,58,237,0.15)',
-    justifyContent: 'center', alignItems: 'center',
-  },
-  pinInner: {
-    width: 32, height: 32, borderRadius: 16,
-    backgroundColor: colors.white,
-    justifyContent: 'center', alignItems: 'center',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15, shadowRadius: 4, elevation: 4,
-  },
+  mapOverlayText: { fontSize: 11, color: colors.textSecondary, flex: 1 },
 
-  checkInWrapper: { alignItems: 'center', marginBottom: spacing.xl },
+  mapPlaceholder: {
+    height: 200,
+    borderRadius: radius.lg,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderStyle: 'dashed',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: spacing.xl,
+    gap: spacing.sm,
+  },
+  mapPlaceholderText: { fontSize: 13, color: colors.textMuted, textAlign: 'center', paddingHorizontal: spacing.xl },
+  locationBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.purple,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.full,
+    gap: 6,
+    marginTop: spacing.xs,
+  },
+  locationBtnText: { fontSize: 12, color: colors.white, fontWeight: '600' },
+  locErrText:      { fontSize: 11, color: colors.absent, textAlign: 'center', marginBottom: spacing.md },
+
+  // Check in button
+  checkInWrapper: { alignItems: 'center', marginBottom: spacing.xl, gap: spacing.sm },
   checkInBtn: {
     width: 90, height: 90, borderRadius: 45,
-    backgroundColor: colors.present,
     justifyContent: 'center', alignItems: 'center',
-    shadowColor: colors.present,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.4, shadowRadius: 12, elevation: 8,
   },
-  checkInBtnOut: { backgroundColor: colors.absent, shadowColor: colors.absent },
-  checkInText: { color: colors.white, fontSize: 11, fontWeight: '700', marginTop: 4 },
+  checkInText:   { color: colors.white, fontSize: 10, fontWeight: '700', marginTop: 4 },
+  retryLocBtn:   { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: spacing.xs },
+  retryLocText:  { fontSize: 12, color: colors.purple, fontWeight: '500' },
 
-  actionsRow: {
-    flexDirection: 'row', justifyContent: 'center', gap: spacing.xl,
-  },
-  actionBtn: {
-    width: 44, height: 44, borderRadius: 22,
-    backgroundColor: colors.white,
-    justifyContent: 'center', alignItems: 'center',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06, shadowRadius: 6, elevation: 3,
-  },
-
+  // Attendance List
   listBody: { padding: spacing.xl },
+  listMonthRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
+    marginBottom: spacing.md,
+  },
+  monthArrow: { padding: 6 },
+  monthText:  { fontSize: 15, fontWeight: '700', color: colors.text, minWidth: 90, textAlign: 'center' },
+
+  summaryRow: {
+    flexDirection: 'row',
+    backgroundColor: colors.white,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05, shadowRadius: 4, elevation: 2,
+  },
+  summaryItem:  { flex: 1, alignItems: 'center' },
+  summaryNum:   { fontSize: 22, fontWeight: '800' },
+  summaryLabel: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+
+  emptyState: { alignItems: 'center', paddingVertical: spacing.xxl * 2, gap: spacing.sm },
+  emptyText:  { fontSize: 13, color: colors.textMuted, textAlign: 'center' },
+
   listItem: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: colors.white,
@@ -317,16 +716,11 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05, shadowRadius: 4, elevation: 2,
   },
-  listDate: { width: 80 },
-  listDay: { fontSize: 13, fontWeight: '700', color: colors.text },
+  listDate:     { width: 80 },
+  listDay:      { fontSize: 13, fontWeight: '700', color: colors.text },
   listDateText: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
-  listTimes: { flex: 1, gap: 4 },
-  listTimeRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  listTimes:    { flex: 1, gap: 4 },
+  listTimeRow:  { flexDirection: 'row', alignItems: 'center', gap: 4 },
   listTimeText: { fontSize: 12, color: colors.textSecondary },
-  statusBadge: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-    borderRadius: radius.sm,
-  },
-  statusText: { fontSize: 11, fontWeight: '700' },
+  statusText:   { fontSize: 11, fontWeight: '700' },
 });
