@@ -15,7 +15,7 @@ A React Native (Expo) UI for an HR management app covering attendance tracking, 
 
 | Dashboard & Attendance | Leave Management | App Overview |
 |---|---|---|
-| ![Dashboard and Attendance](./screenshots/screenshot-1.png) | ![Leave Screen](./screenshots/screenshot-2.png) | ![App Overview](./screenshots/screenshot-3.png) |
+| ![Dashboard and Attendance](https://github.com/user-attachments/assets/017d3c12-0ba3-4ed3-a57b-aeab9b78f1ab) | ![Leave Screen](https://github.com/user-attachments/assets/c9ef99b3-add1-4596-ab89-85697e9f417e) | ![Clock in/out](https://github.com/user-attachments/assets/117be1f0-98ae-476a-a1b1-fc16949c0c5a) |
 
 ## Tech Stack
 
