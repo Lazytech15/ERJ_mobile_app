@@ -2,19 +2,70 @@ import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
+  Modal, ScrollView, Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons, Entypo } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
+
+const logo = require('../assets/logo.png');
 import { colors, spacing, radius } from '../theme';
 import { getSubscription } from '../util/db';
 import { supabase } from '../util/supabase';
 import { useAuth } from '../context/AuthContext';
 
-export default function LoginScreen({ navigation }) {
+// ── Deactivated Account Modal ─────────────────────────────────────────────────
+function DeactivatedModal({ visible, onClose }) {
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      statusBarTranslucent
+      onRequestClose={onClose}
+    >
+      <View style={modalStyles.overlay}>
+        <View style={modalStyles.card}>
+
+          {/* Centered circular icon */}
+          <View style={modalStyles.iconCircle}>
+            <Ionicons name="lock-closed" size={28} color="#fff" />
+          </View>
+
+          <Text style={modalStyles.title}>Account Deactivated</Text>
+
+          <Text style={modalStyles.body}>
+            Your account has been{' '}
+            <Text style={modalStyles.bold}>deactivated</Text> and you can no
+            longer access this application or any of its services.
+          </Text>
+
+          {/* HR instruction box */}
+          <View style={modalStyles.infoBox}>
+            <Ionicons name="people-outline" size={18} color="#EF4444" style={{ marginRight: 8, marginTop: 1 }} />
+            <Text style={modalStyles.infoText}>
+              Please visit your{' '}
+              <Text style={modalStyles.infoTextBold}>HR Department</Text> to
+              follow up and inquire about the reason for deactivation.
+            </Text>
+          </View>
+
+          <TouchableOpacity style={modalStyles.btn} onPress={onClose} activeOpacity={0.85}>
+            <Text style={modalStyles.btnText}>I Understand</Text>
+          </TouchableOpacity>
+
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ── Login Screen ──────────────────────────────────────────────────────────────
+export default function LoginScreen() {
   const [id, setId] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [showDeactivated, setShowDeactivated] = useState(false);
   const { login } = useAuth();
 
   const handleSignIn = async () => {
@@ -46,6 +97,14 @@ export default function LoginScreen({ navigation }) {
         return;
       }
 
+      // ── Inactive / deactivated check ──────────────────────────────────
+      const accountStatus = (data.status ?? 'active').toString().toLowerCase().trim();
+      if (accountStatus === 'inactive' || accountStatus === 'deactivated' || accountStatus === 'disabled') {
+        setLoading(false);
+        setShowDeactivated(true);
+        return;
+      }
+
       const account = {
         email:          data.email,
         password:       data.password,
@@ -55,6 +114,7 @@ export default function LoginScreen({ navigation }) {
         employeeId:     data.employee_id,
         subscriptionId: data.subscription_id,
         createdAt:      data.created_at,
+        status:         data.status,
       };
 
       let subscription = null;
@@ -62,8 +122,27 @@ export default function LoginScreen({ navigation }) {
         subscription = await getSubscription(account.subscriptionId);
       }
 
+      // ── Enrolled-employee status check ────────────────────────────────
+      if (subscription && account.employeeId) {
+        const empId = String(account.employeeId).trim();
+        const enrolledEmp = (subscription.enrolledEmployees ?? []).find(e => {
+          const byId           = String(e.id               ?? '').trim();
+          const byAccountEmpId = String(e.accountEmployeeId ?? '').trim();
+          const byEmployeeId   = String(e.employeeId       ?? e.employee_id ?? '').trim();
+          return byId === empId || byAccountEmpId === empId || byEmployeeId === empId;
+        });
+
+        if (enrolledEmp) {
+          const empStatus = (enrolledEmp.status ?? 'active').toString().toLowerCase().trim();
+          if (empStatus === 'inactive' || empStatus === 'deactivated' || empStatus === 'disabled') {
+            setLoading(false);
+            setShowDeactivated(true);
+            return;
+          }
+        }
+      }
+
       login(account, subscription);
-      navigation.replace('Main');
     } catch (err) {
       Alert.alert('Error', err.message || 'Something went wrong. Please try again.');
     } finally {
@@ -73,149 +152,319 @@ export default function LoginScreen({ navigation }) {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      {/* ── Decorative floating blobs ── */}
+      <View style={styles.topRightDecor} pointerEvents="none">
+        <View style={[styles.blob, styles.blobOuter, { top: -70, right: -70 }]} />
+        <View style={[styles.blob, styles.blobMid, { top: -25, right: -35 }]} />
+        <View style={[styles.blob, styles.blobCore, { top: 45, right: 0 }]} />
+      </View>
+      <View style={styles.bottomLeftDecor} pointerEvents="none">
+        <View style={[styles.blob, styles.blobOuter, { bottom: -70, left: -70 }]} />
+        <View style={[styles.blob, styles.blobMid, { bottom: -25, left: -35 }]} />
+        <View style={[styles.blob, styles.blobCoreAlt, { bottom: 45, left: 0 }]} />
+      </View>
+
       <KeyboardAvoidingView
         style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'android' ? 0 : 0}
       >
-        <View style={styles.heroSection}>
-          <View style={styles.checkBadge}>
-            <Ionicons name="checkmark" size={28} color={colors.white} />
-            <View style={styles.sparkle1} />
-            <View style={styles.sparkle2} />
-          </View>
-          <Text style={styles.welcomeTitle}>Welcome to ERJ</Text>
-          <Text style={styles.welcomeSubtitle}>Login to access your account</Text>
-        </View>
-
-        <View style={styles.formSection}>
-          <View style={styles.brandRow}>
-            <View style={styles.brandLogo}>
-              <Entypo name="text-document" size={20} color={colors.primary} />
-            </View>
-            <View>
-              <Text style={styles.brandName}>ATTENDANCE MANAGEMENT</Text>
-            </View>
-          </View>
-
-          <View style={styles.inputGroup}>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter your ID / username"
-              placeholderTextColor={colors.textMuted}
-              value={id}
-              onChangeText={setId}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-          </View>
-
-          <View style={styles.inputGroup}>
-            <View style={styles.passwordRow}>
-              <TextInput
-                style={[styles.input, { flex: 1, borderBottomWidth: 0, paddingHorizontal: 0 }]}
-                placeholder="Password"
-                placeholderTextColor={colors.textMuted}
-                value={password}
-                onChangeText={setPassword}
-                secureTextEntry={!showPassword}
-              />
-              <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
-                <Ionicons
-                  name={showPassword ? 'eye-off-outline' : 'eye-outline'}
-                  size={20}
-                  color={colors.textMuted}
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.centerWrap}>
+            {/* ── Hero Section ── */}
+            <View style={styles.heroSection}>
+              <View style={styles.logoContainer}>
+                <Image
+                  source={logo}
+                  style={{ width: 100, height: 100 }}
+                  resizeMode="contain"
                 />
+              </View>
+              <Text style={styles.welcomeTitle}>Welcome to ERJ</Text>
+              <Text style={styles.welcomeSubtitle}>Login to access your account</Text>
+            </View>
+
+            {/* ── Form Section ── */}
+            <View style={styles.formSection}>
+              <Text style={styles.formHeading}>Sign In</Text>
+
+              <View style={styles.inputGroup}>
+                <View style={styles.inputWrapper}>
+                  <Ionicons name="person-outline" size={18} color={colors.textMuted} style={styles.inputIcon} />
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Enter your ID / username"
+                    placeholderTextColor={colors.textMuted}
+                    value={id}
+                    onChangeText={setId}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="next"
+                  />
+                </View>
+              </View>
+
+              <View style={styles.inputGroup}>
+                <View style={styles.inputWrapper}>
+                  <Ionicons name="lock-closed-outline" size={18} color={colors.textMuted} style={styles.inputIcon} />
+                  <TextInput
+                    style={[styles.input, { flex: 1 }]}
+                    placeholder="Password"
+                    placeholderTextColor={colors.textMuted}
+                    value={password}
+                    onChangeText={setPassword}
+                    secureTextEntry={!showPassword}
+                    returnKeyType="done"
+                    onSubmitEditing={handleSignIn}
+                  />
+                  <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
+                    <Ionicons
+                      name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+                      size={20}
+                      color={colors.textMuted}
+                    />
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={[styles.signInBtn, loading && { opacity: 0.7 }]}
+                onPress={handleSignIn}
+                disabled={loading}
+                activeOpacity={0.85}
+              >
+                {loading ? (
+                  <ActivityIndicator color={colors.white} />
+                ) : (
+                  <Text style={styles.signInText}>Sign In</Text>
+                )}
               </TouchableOpacity>
             </View>
-            <View style={styles.inputUnderline} />
           </View>
-
-          <TouchableOpacity style={styles.forgotBtn}>
-            <Text style={styles.forgotText}>Forgot Password?</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.signInBtn, loading && { opacity: 0.7 }]}
-            onPress={handleSignIn}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color={colors.white} />
-            ) : (
-              <Text style={styles.signInText}>Sign In</Text>
-            )}
-          </TouchableOpacity>
-
-          <View style={styles.registerRow}>
-            <Text style={styles.registerText}>Are you a new user? </Text>
-            <TouchableOpacity>
-              <Text style={styles.registerLink}>Register</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Deactivated account modal */}
+      <DeactivatedModal
+        visible={showDeactivated}
+        onClose={() => setShowDeactivated(false)}
+      />
     </SafeAreaView>
   );
 }
 
+// ── Styles ────────────────────────────────────────────────────────────────────
+const BG = '#F3F4F4';
+
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.primary },
-  heroSection: {
-    flex: 1, backgroundColor: colors.primary,
-    alignItems: 'center', justifyContent: 'center',
+  safe: { flex: 1, backgroundColor: BG },
+
+  scrollContent: { flexGrow: 1 },
+  centerWrap: {
+    flex: 1,
+    justifyContent: 'center',
     paddingHorizontal: spacing.xxl,
+    paddingVertical: spacing.xxl * 2,
   },
-  checkBadge: {
-    width: 88, height: 88, borderRadius: 44,
-    backgroundColor: colors.purple,
-    justifyContent: 'center', alignItems: 'center',
-    marginBottom: spacing.xl,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.2, shadowRadius: 16, elevation: 8,
+
+  // ── Decorative blobs ──
+  topRightDecor: { position: 'absolute', top: 0, right: 0, width: 260, height: 260, zIndex: 0 },
+  bottomLeftDecor: { position: 'absolute', bottom: 0, left: 0, width: 260, height: 260, zIndex: 0 },
+  blob: { position: 'absolute', borderRadius: 999 },
+  blobOuter: {
+    width: 220, height: 220,
+    backgroundColor: 'rgba(249,115,22,0.10)',
   },
-  sparkle1: {
-    position: 'absolute', top: -6, right: -2,
-    width: 10, height: 10, borderRadius: 5,
-    backgroundColor: colors.white, opacity: 0.8,
+  blobMid: {
+    width: 150, height: 150,
+    backgroundColor: 'rgba(249,115,22,0.22)',
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 14,
+    elevation: 4,
   },
-  sparkle2: {
-    position: 'absolute', bottom: 4, left: -10,
-    width: 6, height: 6, borderRadius: 3,
-    backgroundColor: colors.white, opacity: 0.7,
+  blobCore: {
+    width: 86, height: 86,
+    backgroundColor: colors.primary,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.4,
+    shadowRadius: 18,
+    elevation: 10,
   },
-  welcomeTitle: { fontSize: 26, fontWeight: '800', color: colors.white, marginBottom: spacing.sm },
-  welcomeSubtitle: { fontSize: 14, color: 'rgba(255,255,255,0.85)' },
+  blobCoreAlt: {
+    width: 86, height: 86,
+    backgroundColor: colors.primaryDark,
+    shadowColor: colors.primaryDark,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.4,
+    shadowRadius: 18,
+    elevation: 10,
+  },
+
+  // ── Hero ──
+  heroSection: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.xxl,
+  },
+  logoContainer: {
+    marginBottom: spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  welcomeTitle: { fontSize: 24, fontWeight: '800', color: colors.text, marginBottom: spacing.xs },
+  welcomeSubtitle: { fontSize: 13.5, color: colors.textSecondary },
+
+  // ── Form card ──
   formSection: {
     backgroundColor: colors.white,
-    borderTopLeftRadius: radius.xl + 8,
-    borderTopRightRadius: radius.xl + 8,
+    borderRadius: 28,
+    width: '100%',
+    maxWidth: 420,
+    alignSelf: 'center',
     paddingHorizontal: spacing.xxl,
     paddingTop: spacing.xxl,
     paddingBottom: spacing.xxl,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.10,
+    shadowRadius: 28,
+    elevation: 10,
   },
-  brandRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xxl },
-  brandLogo: {
-    width: 36, height: 36, borderRadius: 10,
-    backgroundColor: colors.brown,
-    justifyContent: 'center', alignItems: 'center',
+  formHeading: {
+    fontSize: 19,
+    fontWeight: '800',
+    color: colors.text,
+    marginBottom: spacing.xl,
+    letterSpacing: 0.2,
   },
-  brandName: { fontSize: 13, fontWeight: '800', color: colors.brown, letterSpacing: 1 },
-  inputGroup: { marginBottom: spacing.xl },
-  input: {
-    fontSize: 15, color: colors.text,
-    paddingVertical: spacing.sm,
-    borderBottomWidth: 1, borderBottomColor: colors.border,
+  inputGroup: { marginBottom: spacing.lg },
+  inputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: BG,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: '#EAEBEC',
+    paddingHorizontal: spacing.md,
+    paddingVertical: Platform.OS === 'ios' ? spacing.md : spacing.sm,
   },
-  passwordRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm },
-  inputUnderline: { height: 1, backgroundColor: colors.border },
-  forgotBtn: { alignSelf: 'flex-end', marginBottom: spacing.xxl },
-  forgotText: { fontSize: 13, color: colors.primary, fontWeight: '600' },
+  inputIcon: { marginRight: spacing.sm },
+  input: { flex: 1, fontSize: 14.5, color: colors.text, padding: 0 },
   signInBtn: {
     backgroundColor: colors.primary, borderRadius: radius.md,
-    paddingVertical: spacing.lg, alignItems: 'center', marginBottom: spacing.lg,
+    paddingVertical: spacing.lg, alignItems: 'center',
+    marginTop: spacing.sm,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 6,
   },
   signInText: { color: colors.white, fontWeight: '700', fontSize: 15 },
-  registerRow: { flexDirection: 'row', justifyContent: 'center' },
-  registerText: { fontSize: 13, color: colors.textSecondary },
-  registerLink: { fontSize: 13, color: colors.primary, fontWeight: '700' },
+});
+
+const modalStyles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15,15,30,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+  },
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 24,
+    paddingTop: 36,
+    paddingBottom: 28,
+    paddingHorizontal: 28,
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: 340,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.22,
+    shadowRadius: 28,
+    elevation: 16,
+  },
+  iconCircle: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: '#EF4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+    shadowColor: '#EF4444',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  title: {
+    fontSize: 19,
+    fontWeight: '800',
+    color: '#111827',
+    marginBottom: 10,
+    textAlign: 'center',
+    letterSpacing: 0.2,
+  },
+  body: {
+    fontSize: 13.5,
+    color: '#6B7280',
+    textAlign: 'center',
+    lineHeight: 21,
+    marginBottom: 16,
+    paddingHorizontal: 4,
+  },
+  bold: {
+    fontWeight: '700',
+    color: '#111827',
+  },
+  infoBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#FEF2F2',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 24,
+    width: '100%',
+  },
+  infoText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#374151',
+    lineHeight: 20,
+  },
+  infoTextBold: {
+    fontWeight: '700',
+    color: '#EF4444',
+  },
+  btn: {
+    backgroundColor: '#EF4444',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    width: '100%',
+    shadowColor: '#EF4444',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  btnText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 15,
+    letterSpacing: 0.3,
+  },
 });

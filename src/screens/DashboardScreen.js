@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView,
+  View, Text, StyleSheet, ScrollView, Image,
   TouchableOpacity, ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -160,10 +160,23 @@ export default function DashboardScreen() {
         }
 
         // ── find the employee ───────────────────────────────────────────
+        // accountEmployeeId is the id stored in accounts.employee_id (what the
+        // mobile app uses). e.id is the enrolledEmployee's own generated id.
+        // We match on EITHER so the lookup works regardless of which was stored.
+        const empId = String(employeeId ?? '').trim();
         const emp = (sub.enrolledEmployees ?? []).find(e => {
-          const eid = e.id ?? e.employeeId ?? e.employee_id ?? '';
-          return String(eid).trim() === String(employeeId).trim();
+          const byId            = String(e.id             ?? '').trim();
+          const byAccountEmpId  = String(e.accountEmployeeId ?? '').trim();
+          const byEmployeeId    = String(e.employeeId     ?? e.employee_id ?? '').trim();
+          return byId === empId || byAccountEmpId === empId || byEmployeeId === empId;
         }) ?? null;
+
+        if (__DEV__) {
+          console.log('[Dashboard] empId looking for:', empId);
+          console.log('[Dashboard] emp found:', emp ? `${emp.firstName} ${emp.lastName}` : 'NOT FOUND');
+          console.log('[Dashboard] profilePhotoUrl:', emp?.profilePhotoUrl ?? 'none');
+          console.log('[Dashboard] employeeCode:', emp?.employeeCode ?? 'none');
+        }
 
         // ── filter records for this employee ────────────────────────────
         const allRecords = (sub.attendanceRecords ?? [])
@@ -232,8 +245,21 @@ export default function DashboardScreen() {
     .join('')
     .toUpperCase();
 
-  const role    = employee?.role ?? account?.role ?? '';
-  const address = employee?.address ?? employee?.location ?? '';
+  const role         = employee?.role ?? account?.role ?? '';
+  const department   = employee?.department ?? '';
+  const employeeCode = employee?.employeeCode ?? employee?.employee_code ?? employee?.empCode ?? employee?.emp_code ?? employee?.code ?? '';
+  const joinDate     = employee?.joinDate ?? employee?.join_date ?? employee?.startDate ?? employee?.start_date ?? '';
+  const email        = employee?.email ?? account?.email ?? '';
+  const shift        = employee?.shiftName ?? employee?.shift ?? '';
+  const address        = employee?.address ?? employee?.location ?? '';
+  const profilePhotoUrl = employee?.profilePhotoUrl ?? employee?.profile_photo_url ?? employee?.photoUrl ?? employee?.photo_url ?? employee?.avatar ?? employee?.avatarUrl ?? employee?.avatar_url ?? null;
+
+  function fmtJoinDate(val) {
+    if (!val) return '';
+    const d = new Date(`${String(val).slice(0, 10)}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return val;
+    return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  }
 
   const hh   = clockTime.getHours();
   const mm   = String(clockTime.getMinutes()).padStart(2, '0');
@@ -262,23 +288,25 @@ export default function DashboardScreen() {
       <ScrollView
         style={styles.scroll}
         showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={colors.white}
+            colors={[colors.primary]}
+            progressBackgroundColor={colors.brown}
+            progressViewOffset={0}
+          />
         }
       >
         {/* ── Header ─────────────────────────────────────────────────── */}
         <View style={styles.header}>
+          {/* Top row: greeting + notif */}
           <View style={styles.headerRow}>
-            <View style={styles.avatarRow}>
-              <View style={styles.avatar}>
-                <Text style={styles.avatarText}>{initials || '?'}</Text>
-              </View>
-              <View style={{ marginLeft: spacing.sm }}>
-                <Text style={styles.headerName} numberOfLines={1}>
-                  {displayName || 'Employee'}
-                </Text>
-                <Text style={styles.headerRole}>{role}</Text>
-              </View>
+            <View>
+              <Text style={styles.headerGreeting}>Good {hh < 12 ? 'Morning' : hh < 17 ? 'Afternoon' : 'Evening'} 👋</Text>
+              <Text style={styles.headerDate}>{todayLabel}</Text>
             </View>
             <View style={styles.notifBadge}>
               <Ionicons name="notifications-outline" size={20} color={colors.white} />
@@ -286,7 +314,61 @@ export default function DashboardScreen() {
             </View>
           </View>
 
-          <Text style={styles.headerDate}>{todayLabel}</Text>
+          {/* Profile card — centered */}
+          <View style={styles.profileCard}>
+            {/* Avatar: photo or initials fallback */}
+            <View style={styles.profileAvatarWrap}>
+              {profilePhotoUrl ? (
+                <Image
+                  source={{ uri: profilePhotoUrl }}
+                  style={styles.profileAvatarImg}
+                  resizeMode="cover"
+                />
+              ) : (
+                <View style={styles.profileAvatarFallback}>
+                  <Text style={styles.profileAvatarText}>{initials || '?'}</Text>
+                </View>
+              )}
+              <View style={styles.profileActiveDot} />
+            </View>
+
+            {/* Name / role / code stacked centered */}
+            <Text style={styles.profileName} numberOfLines={1}>{displayName || 'Employee'}</Text>
+            {!!role && (
+              <Text style={styles.profileRole}>
+                {role}{!!department ? ` · ${department}` : ''}
+              </Text>
+            )}
+            {!!employeeCode && (
+              <View style={styles.profileCodeBadge}>
+                <Text style={styles.profileCodeText}>{employeeCode}</Text>
+              </View>
+            )}
+          </View>
+
+          {/* Detail rows — centered */}
+          {(!!email || !!shift || !!joinDate) && (
+            <View style={styles.profileDetails}>
+              {!!email && (
+                <View style={styles.profileDetailRow}>
+                  <Ionicons name="mail-outline" size={12} color="rgba(255,255,255,0.55)" />
+                  <Text style={styles.profileDetailText} numberOfLines={1}>{email}</Text>
+                </View>
+              )}
+              {!!shift && (
+                <View style={styles.profileDetailRow}>
+                  <Ionicons name="time-outline" size={12} color="rgba(255,255,255,0.55)" />
+                  <Text style={styles.profileDetailText}>{shift}</Text>
+                </View>
+              )}
+              {!!joinDate && (
+                <View style={styles.profileDetailRow}>
+                  <Ionicons name="calendar-outline" size={12} color="rgba(255,255,255,0.55)" />
+                  <Text style={styles.profileDetailText}>Joined {fmtJoinDate(joinDate)}</Text>
+                </View>
+              )}
+            </View>
+          )}
 
           <View style={styles.timeCard}>
             <Text style={styles.timeLabel}>Working Time</Text>
@@ -340,6 +422,7 @@ export default function DashboardScreen() {
         </View>
 
         {/* ── Body ───────────────────────────────────────────────────── */}
+        <View style={styles.bodyWrap}>
         <View style={styles.body}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Total Attendance (Days)</Text>
@@ -390,6 +473,7 @@ export default function DashboardScreen() {
             <BarChart style={{ marginTop: spacing.md }} />
           </View>
         </View>
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -399,34 +483,85 @@ export default function DashboardScreen() {
 
 const styles = StyleSheet.create({
   safe:   { flex: 1, backgroundColor: colors.brown },
-  scroll: { flex: 1, backgroundColor: colors.cream },
+  // ScrollView bg is brown so the overscroll bounce area matches the header
+  scroll: { flex: 1, backgroundColor: colors.brown },
+  scrollContent: { flexGrow: 1 },
+  // Cream wrapper only covers the body section, not the overscroll zone
+  bodyWrap: { backgroundColor: colors.cream },
   center: { justifyContent: 'center', alignItems: 'center' },
 
   header: {
     backgroundColor: colors.brown,
     paddingHorizontal: spacing.xl,
+    paddingTop: spacing.sm,
     paddingBottom: spacing.xxl,
   },
   headerRow: {
-    flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'space-between', marginBottom: spacing.md,
+    flexDirection: 'row', alignItems: 'flex-start',
+    justifyContent: 'space-between', marginBottom: spacing.lg,
   },
-  avatarRow: { flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: spacing.sm },
-  avatar: {
-    width: 42, height: 42, borderRadius: 21,
-    backgroundColor: colors.primary,
-    justifyContent: 'center', alignItems: 'center', flexShrink: 0,
-  },
-  avatarText:  { color: colors.white, fontWeight: '700', fontSize: 14 },
-  headerName:  { color: colors.white, fontWeight: '700', fontSize: 15, maxWidth: 200 },
-  headerRole:  { color: 'rgba(255,255,255,0.6)', fontSize: 12 },
+  headerGreeting: { color: colors.white, fontWeight: '700', fontSize: 16 },
+  headerDate: { color: 'rgba(255,255,255,0.6)', fontSize: 12, marginTop: 2 },
   notifBadge:  { position: 'relative', padding: 6 },
   badge: {
     position: 'absolute', top: 5, right: 5,
     width: 8, height: 8, borderRadius: 4,
     backgroundColor: colors.primary,
   },
-  headerDate: { color: 'rgba(255,255,255,0.7)', fontSize: 13, marginBottom: spacing.md },
+
+  // Profile card inside header — centered layout
+  profileCard: {
+    alignItems: 'center',
+    marginBottom: spacing.md,
+  },
+  profileAvatarWrap: { position: 'relative', marginBottom: spacing.md },
+  // The outer circle (border ring) — used for fallback View
+  profileAvatar: {
+    width: 90, height: 90, borderRadius: 45,
+    borderWidth: 3, borderColor: 'rgba(255,255,255,0.4)',
+    overflow: 'hidden',
+  },
+  // Explicit img style so RN Image gets width/height directly
+  profileAvatarImg: {
+    width: 90, height: 90, borderRadius: 45,
+    borderWidth: 3, borderColor: 'rgba(255,255,255,0.4)',
+  },
+  profileAvatarFallback: {
+    width: 90, height: 90, borderRadius: 45,
+    borderWidth: 3, borderColor: 'rgba(255,255,255,0.4)',
+    backgroundColor: colors.primary,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  profileAvatarText: { color: colors.white, fontWeight: '800', fontSize: 28 },
+  profileActiveDot: {
+    position: 'absolute', bottom: 4, right: 4,
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: colors.present,
+    borderWidth: 2, borderColor: colors.brown,
+  },
+  profileName: { color: colors.white, fontWeight: '800', fontSize: 20, textAlign: 'center' },
+  profileRole: { color: colors.primary, fontSize: 13, fontWeight: '600', marginTop: 3, textAlign: 'center' },
+  profileCodeBadge: {
+    marginTop: spacing.sm,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    paddingHorizontal: spacing.md, paddingVertical: 4,
+    borderRadius: radius.full,
+  },
+  profileCodeText: { fontSize: 12, color: 'rgba(255,255,255,0.85)', fontWeight: '700', letterSpacing: 1 },
+
+  profileDetails: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.lg,
+    gap: spacing.xs,
+    alignSelf: 'center',           // shrink-wrap to content width
+    alignItems: 'center',          // center each row
+    minWidth: '60%',
+  },
+  profileDetailRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+  profileDetailText: { fontSize: 12, color: 'rgba(255,255,255,0.75)' },
 
   timeCard: {
     backgroundColor: colors.white, borderRadius: radius.lg,
