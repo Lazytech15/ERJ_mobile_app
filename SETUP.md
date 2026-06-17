@@ -10,3 +10,8 @@ npm install
 
 ## 3. Start (MUST use --clear)
 npx expo start --clear
+
+
+## 4. build android / IOS
+eas build --platform android --profile preview
+eas build --platform ios --profile production

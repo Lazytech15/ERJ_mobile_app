@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "attendance-app",
-    "slug": "attendance-app",
+    "name": "erj-mobile-application",
+    "slug": "erj-mobile-application",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -12,7 +12,8 @@
         {
           "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera to scan attendance QR codes."
         }
-      ]
+      ],
+      "expo-font"
     ],
     "ios": {
       "supportsTablet": true
@@ -23,10 +24,21 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "package": "com.emman16.erjmobileapplication"
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "d2b9736b-7ea2-42e8-a583-1c71d32351fa"
+      }
+    },
+    "owner": "emman16"
   }
 }

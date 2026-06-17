@@ -6,7 +6,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import MapView, { Marker, Circle } from 'react-native-maps';
+import { WebView } from 'react-native-webview';
 import { colors, spacing, radius } from '../theme';
 import { useAuth } from '../context/AuthContext';
 import { getSubscription, putSubscription } from '../util/db';
@@ -156,6 +156,49 @@ function parseQRPayload(raw) {
 const STATUS_COLORS = { present: colors.present, late: colors.late, absent: colors.absent };
 const STATUS_LABELS = { present: 'Present', late: 'Late', absent: 'Absent' };
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/**
+ * Builds a self-contained HTML page that renders a Leaflet map with
+ * OpenStreetMap tiles — no API key, no billing account, no Google Cloud
+ * setup required. Shows a marker + 100m radius circle at the given coords,
+ * the same visual the previous react-native-maps screen showed.
+ */
+function buildLeafletMapHTML(latitude, longitude, label) {
+  const safeLabel = (label || 'Your Location').replace(/[<>&"]/g, '');
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+    .leaflet-control-attribution { font-size: 9px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const lat = ${latitude};
+    const lng = ${longitude};
+    const map = L.map('map', { zoomControl: false, attributionControl: true }).setView([lat, lng], 17);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+    L.marker([lat, lng]).addTo(map).bindPopup(${JSON.stringify(safeLabel)});
+    L.circle([lat, lng], {
+      radius: 100,
+      color: 'rgba(124,58,237,0.4)',
+      fillColor: 'rgba(124,58,237,0.1)',
+      fillOpacity: 1,
+      weight: 1
+    }).addTo(map);
+  </script>
+</body>
+</html>`;
+}
 
 // ─── component ────────────────────────────────────────────────────────────────
 
@@ -541,31 +584,15 @@ export default function AttendanceScreen() {
             {/* Map — remote employees only; onsite employees rely on QR scan, no GPS needed */}
             {!isOnsite && (location ? (
               <View style={styles.mapContainer}>
-                <MapView
+                <WebView
                   ref={mapRef}
                   style={styles.map}
-                  initialRegion={{
-                    latitude:       location.latitude,
-                    longitude:      location.longitude,
-                    latitudeDelta:  0.002,
-                    longitudeDelta: 0.002,
-                  }}
-                  showsUserLocation
-                  showsMyLocationButton={false}
-                >
-                  <Marker
-                    coordinate={location}
-                    title="Your Location"
-                    description={locationAddr}
-                  />
-                  <Circle
-                    center={location}
-                    radius={100}
-                    fillColor="rgba(124,58,237,0.1)"
-                    strokeColor="rgba(124,58,237,0.4)"
-                    strokeWidth={1}
-                  />
-                </MapView>
+                  originWhitelist={['*']}
+                  source={{ html: buildLeafletMapHTML(location.latitude, location.longitude, locationAddr) }}
+                  scrollEnabled={false}
+                  javaScriptEnabled
+                  domStorageEnabled
+                />
 
                 <View style={styles.mapOverlay}>
                   <Ionicons name="location" size={12} color={colors.purple} />
