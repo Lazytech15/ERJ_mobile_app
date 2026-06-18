@@ -9,9 +9,13 @@ import * as Location from 'expo-location';
 import { WebView } from 'react-native-webview';
 import { colors, spacing, radius } from '../theme';
 import { useAuth } from '../context/AuthContext';
-import { getSubscription, putSubscription } from '../util/db';
+import { getSubscription, getAttendanceRecords, putAttendanceRecords } from '../util/db';
 import { supabase } from '../util/supabase';
 import QRScannerModal from '../components/QRScannerModal';
+import {
+  getShiftSessions, buildSessionsForShift, nextActionableSessionIndex,
+  deriveLegacyPair, computeWorkedMinutes, minutesToHHMM, getSessionPunches,
+} from '../util/attendance';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -42,6 +46,9 @@ function normalizeRecord(r) {
     date:       r.date       ?? r.attendanceDate ?? r.attendance_date ?? r.day ?? '',
     checkIn:    r.clockIn    ?? r.checkIn    ?? r.check_in  ?? r.timeIn  ?? r.time_in  ?? null,
     checkOut:   r.clockOut   ?? r.checkOut   ?? r.check_out ?? r.timeOut ?? r.time_out ?? null,
+    // Per-session morning/afternoon/evening punches, when the employee's
+    // shift is a 'split' shift. Empty/undefined for a standard single-pair shift.
+    sessions:   r.sessions   ?? [],
     status:     (r.status ?? '').toString().toLowerCase(),
     hours:      r.hours      ?? r.hoursWorked ?? r.hours_worked ?? null,
     location:   r.location   ?? r.checkInLocation ?? null,
@@ -217,21 +224,22 @@ export default function AttendanceScreen() {
   const [listMonth, setListMonth]       = useState(new Date().getMonth());
   const [listYear]                      = useState(new Date().getFullYear());
   const [showScanner, setShowScanner]   = useState(false);   // ← QR scanner modal
+  // Resolved shift info — updated on every fetchData so we always reflect the
+  // latest data from Supabase rather than the login-time subscription snapshot.
+  const [shiftStart,  setShiftStart]    = useState('09:00');
+  const [clockInMode, setClockInMode]   = useState('remote'); // 'remote' | 'onsite'
+  // The shift's session blocks (e.g. Morning/Afternoon/Evening for a split
+  // shift, or a single unlabeled block for a standard shift).
+  const [shiftSessions, setShiftSessions] = useState([{ id: 'full', label: '', start: '', end: '' }]);
+  // myEmployee / myShift refs for QR validation — kept in sync by fetchData
+  const myEmployeeRef = useRef(null);
+  const myShiftRef    = useRef(null);
   const mapRef = useRef(null);
 
   const subscriptionId = account?.subscriptionId ?? null;
   const employeeId     = account?.employeeId     ?? null;
 
-  const employees     = subscription?.enrolledEmployees ?? [];
-  const shifts        = subscription?.shifts ?? [];
   const lateThreshold = Number(subscription?.settings?.lateThreshold ?? 15);
-  const myEmployee    = employees.find(e => String(e.id) === String(employeeId));
-  const myShift       = myEmployee?.shiftId
-    ? shifts.find(s => String(s.id) === String(myEmployee.shiftId))
-    : null;
-  const shiftStart    = myShift?.start ?? '09:00';
-  // 'onsite' shifts require QR scan; 'remote' (default) shifts use GPS
-  const clockInMode   = myShift?.clockInMode ?? 'remote';
   const isOnsite      = clockInMode === 'onsite';
 
   // ── fetch data ─────────────────────────────────────────────────────────────
@@ -240,9 +248,33 @@ export default function AttendanceScreen() {
     try {
       const sub = await getSubscription(subscriptionId);
       if (!sub) return;
+
+      // Resolve the employee and their shift fresh from Supabase on every fetch.
+      // This is the source-of-truth for clockInMode — not the login-time snapshot.
+      const empId = String(employeeId).trim();
+      const freshEmployee = (sub.enrolledEmployees ?? []).find(e =>
+        String(e.id ?? '').trim() === empId ||
+        String(e.accountEmployeeId ?? '').trim() === empId
+      ) ?? null;
+      const freshShift = freshEmployee?.shiftId
+        ? (sub.shifts ?? []).find(s => String(s.id) === String(freshEmployee.shiftId))
+        : null;
+
+      // clockInMode priority:
+      //   1. employee.clockInMode  — denormalized by web app (most reliable going forward)
+      //   2. shift.clockInMode     — shift-level fallback for existing employees
+      //   3. 'remote'              — safe default
+      const resolvedMode = freshEmployee?.clockInMode ?? freshShift?.clockInMode ?? 'remote';
+
+      myEmployeeRef.current = freshEmployee;
+      myShiftRef.current    = freshShift;
+      setShiftStart(freshShift?.start ?? '09:00');
+      setClockInMode(resolvedMode);
+      setShiftSessions(getShiftSessions(freshShift));
+
       const records = (sub.attendanceRecords ?? [])
         .map(normalizeRecord)
-        .filter(r => String(r.employeeId).trim() === String(employeeId).trim());
+        .filter(r => String(r.employeeId).trim() === empId);
 
       const tKey = todayKey();
       const todayRec = records.find(r => toDateKey(r.date) === tKey) ?? null;
@@ -294,68 +326,126 @@ export default function AttendanceScreen() {
     if (tab === 'today' && !location && !isOnsite) requestLocation();
   }, [tab, isOnsite]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── today's session state ──────────────────────────────────────────────────
+  // The full punch list for today, lined up against the employee's shift
+  // sessions (Morning/Afternoon/Evening, or one plain block for a standard
+  // shift), regardless of whether today's record exists yet.
+  const todaySessions   = buildSessionsForShift(myShiftRef.current, todayRecord);
+  const nextActionIdx   = nextActionableSessionIndex(todaySessions);
+  const allSessionsDone = nextActionIdx === -1;
+  // The button is offering a "Clock In" when the next actionable session has
+  // no clockIn yet, or a "Clock Out" when it has a clockIn already waiting on
+  // its clockOut.
+  const nextIsClockOut  = !allSessionsDone && !!todaySessions[nextActionIdx]?.clockIn;
+  const nextSessionLabel = !allSessionsDone ? (todaySessions[nextActionIdx]?.label || '') : '';
+
+  // For DISPLAY only: prefer the sessions already saved on the record (set by
+  // the web app) over rebuilding from the shift template. This ensures 3+ session
+  // records render correctly even when the shift is not resolved from Supabase.
+  const displaySessions = (todayRecord?.sessions?.length ?? 0) > 0
+    ? todayRecord.sessions
+    : todaySessions;
   // ── core clock-in/out logic (shared by both manual and QR paths) ───────────
+  // clockIn starts whichever session is next in line (Morning, then Afternoon,
+  // then Evening, ...). On the very first clock-in of the day it creates the
+  // record with the full session list derived from the employee's shift, with
+  // every session empty except the one being clocked in right now.
   const clockIn = useCallback(async ({ timeStr, dateStr, locStr, locOverride = false }) => {
-    const sub = await getSubscription(subscriptionId);
-    if (!sub) throw new Error('Failed to load subscription data.');
+    const records = (await getAttendanceRecords(subscriptionId)) ?? [];
 
-    const records = sub.attendanceRecords ?? [];
-    const status  = deriveStatus(timeStr, shiftStart, lateThreshold);
+    const existingIdx = records.findIndex(r => {
+      const norm = normalizeRecord(r);
+      return String(norm.employeeId).trim() === String(employeeId).trim() && toDateKey(norm.date) === dateStr;
+    });
+    const existingRaw = existingIdx >= 0 ? records[existingIdx] : null;
 
-    const newRecord = {
-      id:         `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    const sessions = buildSessionsForShift(myShiftRef.current, existingRaw);
+    const actionIdx = nextActionableSessionIndex(sessions);
+    if (actionIdx === -1 || sessions[actionIdx].clockIn) {
+      throw new Error('You have already clocked in for every session today.');
+    }
+    sessions[actionIdx] = { ...sessions[actionIdx], clockIn: timeStr };
+
+    // Status is derived from the FIRST session's clock-in vs shift start,
+    // same rule the web app uses, so both apps agree on present/late.
+    const status = deriveStatus(sessions[0]?.clockIn, shiftStart, lateThreshold);
+    const { clockIn: legacyIn, clockOut: legacyOut } = deriveLegacyPair(sessions);
+
+    const baseRecord = existingRaw ?? {
+      id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       employeeId: String(employeeId),
-      date:       dateStr,
-      clockIn:    timeStr,
-      clockOut:   null,
+      date: dateStr,
+      notes: '',
+      location: locStr,
+    };
+    const newRecord = {
+      ...baseRecord,
+      sessions,
+      clockIn: legacyIn,
+      clockOut: legacyOut,
       status,
-      notes:      locOverride ? 'QR scan clock-in' : '',
-      hours:      null,
-      location:   locStr,
+      notes: locOverride ? 'QR scan clock-in' : (baseRecord.notes || ''),
+      hours: parseFloat((computeWorkedMinutes({ sessions }) / 60).toFixed(2)),
+      location: locStr,
     };
 
-    const updatedRecords = [...records, newRecord];
-    const updatedSub     = { ...sub, attendanceRecords: updatedRecords };
+    const updatedRecords = existingIdx >= 0
+      ? records.map((r, i) => i === existingIdx ? newRecord : r)
+      : [...records, newRecord];
 
-    await putSubscription(updatedSub);
-    setSubscription(updatedSub);
+    await putAttendanceRecords(subscriptionId, updatedRecords);
+    setSubscription(prev => prev ? { ...prev, attendanceRecords: updatedRecords } : prev);
     setTodayRecord(normalizeRecord(newRecord));
-    setAllRecords(prev => [...prev, normalizeRecord(newRecord)]);
+    setAllRecords(prev => existingIdx >= 0
+      ? prev.map(r => r.id === newRecord.id ? normalizeRecord(newRecord) : r)
+      : [...prev, normalizeRecord(newRecord)]);
 
-    return { status, timeStr, locStr };
+    return { status, timeStr, locStr, session: sessions[actionIdx] };
   }, [subscriptionId, employeeId, shiftStart, lateThreshold, setSubscription]);
 
+  // clockOut closes whichever session is currently open (has a clockIn but no
+  // clockOut yet) — the same session the button is currently offering to close.
   const clockOut = useCallback(async ({ timeStr, dateStr }) => {
-    const sub = await getSubscription(subscriptionId);
-    if (!sub) throw new Error('Failed to load subscription data.');
+    const records = (await getAttendanceRecords(subscriptionId)) ?? [];
 
-    const records = sub.attendanceRecords ?? [];
-    const hours   = hoursBetween(todayRecord.checkIn, timeStr);
-
-    const updatedRecord = { ...todayRecord, checkOut: timeStr, hours: parseFloat(hours.toFixed(2)) };
-
-    const updatedRecords = records.map(r => {
+    const existingIdx = records.findIndex(r => {
       const norm = normalizeRecord(r);
-      if (
-        String(norm.employeeId).trim() === String(employeeId).trim() &&
-        toDateKey(norm.date) === dateStr
-      ) {
-        return { ...r, clockOut: timeStr, hours: parseFloat(hours.toFixed(2)) };
-      }
-      return r;
+      return String(norm.employeeId).trim() === String(employeeId).trim() && toDateKey(norm.date) === dateStr;
     });
+    if (existingIdx === -1) throw new Error('No clock-in found for today yet.');
 
-    const updatedSub = { ...sub, attendanceRecords: updatedRecords };
-    await putSubscription(updatedSub);
-    setSubscription(updatedSub);
+    const existingRaw = records[existingIdx];
+    const sessions = buildSessionsForShift(myShiftRef.current, existingRaw);
+    const openIdx = sessions.findIndex(s => s.clockIn && !s.clockOut);
+    if (openIdx === -1) throw new Error('There is no open session to clock out of.');
+
+    sessions[openIdx] = { ...sessions[openIdx], clockOut: timeStr };
+    const { clockIn: legacyIn, clockOut: legacyOut } = deriveLegacyPair(sessions);
+    const totalMinutes = computeWorkedMinutes({ sessions });
+
+    const updatedRecord = {
+      ...existingRaw,
+      sessions,
+      clockIn: legacyIn,
+      clockOut: legacyOut,
+      hours: parseFloat((totalMinutes / 60).toFixed(2)),
+    };
+
+    const updatedRecords = records.map((r, i) => i === existingIdx ? updatedRecord : r);
+    await putAttendanceRecords(subscriptionId, updatedRecords);
+    setSubscription(prev => prev ? { ...prev, attendanceRecords: updatedRecords } : prev);
     setTodayRecord(normalizeRecord(updatedRecord));
-    setAllRecords(prev => prev.map(r =>
-      toDateKey(r.date) === dateStr && String(r.employeeId).trim() === String(employeeId).trim()
-        ? normalizeRecord(updatedRecord) : r
-    ));
+    setAllRecords(prev => prev.map(r => r.id === updatedRecord.id ? normalizeRecord(updatedRecord) : r));
 
-    return { hours };
-  }, [subscriptionId, employeeId, todayRecord, setSubscription]);
+    // Minutes worked in the session that just closed (what the alert should show).
+    const sessionMinutes = computeWorkedMinutes({ sessions: [sessions[openIdx]] });
+    return {
+      hours: sessionMinutes / 60,
+      totalHours: totalMinutes / 60,
+      session: sessions[openIdx],
+      allSessionsDone: nextActionableSessionIndex(sessions) === -1,
+    };
+  }, [subscriptionId, employeeId, setSubscription]);
 
   // ── manual clock in / out button ───────────────────────────────────────────
   const handleClockAction = useCallback(async () => {
@@ -367,29 +457,35 @@ export default function AttendanceScreen() {
       Alert.alert('Location Required', 'We need your location to record attendance. Tap "Use My Location" to allow it.');
       return;
     }
+    if (allSessionsDone) {
+      Alert.alert('Already Recorded', 'You have already completed every clock-in/out session for today.');
+      return;
+    }
 
     const now     = new Date();
     const timeStr = toHHMM(now);
     const dateStr = todayKey();
     const locStr  = locationAddr || `${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}`;
+    const label   = nextSessionLabel ? `${nextSessionLabel} ` : '';
 
     setSubmitting(true);
     try {
-      if (!todayRecord) {
+      if (!nextIsClockOut) {
         const { status } = await clockIn({ timeStr, dateStr, locStr });
-        Alert.alert('Checked In ✓', `Time: ${fmtTime(timeStr)}\nStatus: ${STATUS_LABELS[status]}\nLocation: ${locStr}`);
-      } else if (!todayRecord.checkOut) {
-        const { hours } = await clockOut({ timeStr, dateStr });
-        Alert.alert('Checked Out ✓', `Time: ${fmtTime(timeStr)}\nHours worked: ${hours.toFixed(2)} hrs`);
+        Alert.alert(`${label}Checked In ✓`, `Time: ${fmtTime(timeStr)}\nStatus: ${STATUS_LABELS[status]}\nLocation: ${locStr}`);
       } else {
-        Alert.alert('Already Recorded', 'You have already checked in and out for today.');
+        const { hours, allSessionsDone: done } = await clockOut({ timeStr, dateStr });
+        Alert.alert(
+          `${label}Checked Out ✓`,
+          `Time: ${fmtTime(timeStr)}\nHours worked: ${hours.toFixed(2)} hrs${done ? '\n\nAll sessions complete for today.' : ''}`,
+        );
       }
     } catch (err) {
       Alert.alert('Error', err.message ?? 'Something went wrong.');
     } finally {
       setSubmitting(false);
     }
-  }, [subscriptionId, employeeId, location, locationAddr, todayRecord, clockIn, clockOut]);
+  }, [subscriptionId, employeeId, location, locationAddr, allSessionsDone, nextIsClockOut, nextSessionLabel, clockIn, clockOut]);
 
   // ── QR scan handler ────────────────────────────────────────────────────────
   const handleQRScanned = useCallback(async (rawData) => {
@@ -415,17 +511,17 @@ export default function AttendanceScreen() {
     }
 
     // 3. Confirm the QR shift matches the employee's assigned shift
-    if (myEmployee?.shiftId && payload.shiftId && String(payload.shiftId) !== String(myEmployee.shiftId)) {
+    if (myEmployeeRef.current?.shiftId && payload.shiftId && String(payload.shiftId) !== String(myEmployeeRef.current.shiftId)) {
       Alert.alert(
         'Wrong Shift QR',
-        `This QR code is for a different shift. Please scan the QR for your assigned shift (${myShift?.name ?? 'your shift'}).`,
+        `This QR code is for a different shift. Please scan the QR for your assigned shift (${myShiftRef.current?.name ?? 'your shift'}).`,
       );
       return;
     }
 
-    // 4. Guard: already clocked in and out
-    if (todayRecord?.checkIn && todayRecord?.checkOut) {
-      Alert.alert('Already Recorded', 'You have already checked in and out for today.');
+    // 4. Guard: every session for the day already complete
+    if (allSessionsDone) {
+      Alert.alert('Already Recorded', 'You have already completed every clock-in/out session for today.');
       return;
     }
 
@@ -436,22 +532,23 @@ export default function AttendanceScreen() {
     const locStr  = locationAddr || (location
       ? `${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}`
       : 'Onsite (QR verified)');
+    const label = nextSessionLabel ? `${nextSessionLabel} ` : '';
 
     setSubmitting(true);
     try {
-      if (!todayRecord) {
+      if (!nextIsClockOut) {
         // ── QR Clock In ────────────────────────────────────────────────────
         const { status } = await clockIn({ timeStr, dateStr, locStr, locOverride: true });
         Alert.alert(
-          'QR Check-In ✓',
+          `${label}QR Check-In ✓`,
           `Time: ${fmtTime(timeStr)}\nStatus: ${STATUS_LABELS[status]}\nShift QR verified ✓`,
         );
-      } else if (!todayRecord.checkOut) {
+      } else {
         // ── QR Clock Out ───────────────────────────────────────────────────
-        const { hours } = await clockOut({ timeStr, dateStr });
+        const { hours, allSessionsDone: done } = await clockOut({ timeStr, dateStr });
         Alert.alert(
-          'QR Check-Out ✓',
-          `Time: ${fmtTime(timeStr)}\nHours worked: ${hours.toFixed(2)} hrs\nShift QR verified ✓`,
+          `${label}QR Check-Out ✓`,
+          `Time: ${fmtTime(timeStr)}\nHours worked: ${hours.toFixed(2)} hrs\nShift QR verified ✓${done ? '\n\nAll sessions complete for today.' : ''}`,
         );
       }
     } catch (err) {
@@ -459,7 +556,7 @@ export default function AttendanceScreen() {
     } finally {
       setSubmitting(false);
     }
-  }, [subscriptionId, employeeId, location, locationAddr, todayRecord, clockIn, clockOut]);
+  }, [subscriptionId, employeeId, location, locationAddr, allSessionsDone, nextIsClockOut, nextSessionLabel, clockIn, clockOut]);
 
   // ── derived list for the selected month ────────────────────────────────────
   const prefix = `${listYear}-${String(listMonth+1).padStart(2,'0')}`;
@@ -468,10 +565,12 @@ export default function AttendanceScreen() {
     .sort((a, b) => toDateKey(b.date).localeCompare(toDateKey(a.date)));
 
   // ── button state ───────────────────────────────────────────────────────────
-  const alreadyDone = !!(todayRecord?.checkIn && todayRecord?.checkOut);
-  const checkedIn   = !!(todayRecord?.checkIn && !todayRecord?.checkOut);
+  const alreadyDone = allSessionsDone && displaySessions.some(s => s.clockIn);
+  const checkedIn   = nextIsClockOut;
   const btnColor    = alreadyDone ? colors.textMuted : checkedIn ? colors.absent : colors.present;
-  const btnLabel    = alreadyDone ? 'Done' : checkedIn ? 'Check Out' : 'Check In';
+  const btnLabel    = alreadyDone
+    ? 'Done'
+    : `${nextSessionLabel ? nextSessionLabel + ' ' : ''}${checkedIn ? 'Clock Out' : 'Clock In'}`;
   const btnIcon     = alreadyDone ? 'checkmark-circle-outline' : 'finger-print-outline';
 
   const todayLabel = new Date().toLocaleDateString('en-PH', {
@@ -543,20 +642,56 @@ export default function AttendanceScreen() {
               </Text>
 
               {todayRecord?.checkIn ? (
-                <View style={styles.checkTimesRow}>
-                  <View style={styles.checkItem}>
-                    <Ionicons name="log-in-outline" size={14} color={colors.present} />
-                    <Text style={styles.checkItemLabel}>In</Text>
-                    <Text style={styles.checkItemValue}>{fmtTime(todayRecord.checkIn)}</Text>
+                displaySessions.length >= 1 ? (
+                  /* ── Split / multi-session: one row per session ── */
+                  <View style={styles.sessionsContainer}>
+                    {displaySessions.map((s, idx) => {
+                      const hasIn  = !!s.clockIn;
+                      const hasOut = !!s.clockOut;
+                      const isOpen = hasIn && !hasOut;
+                      return (
+                        <View key={s.sessionId ?? idx} style={styles.sessionRow}>
+                          <View style={[
+                            styles.sessionDot,
+                            { backgroundColor: hasIn ? (isOpen ? colors.late : colors.present) : colors.border },
+                          ]} />
+                          <Text style={styles.sessionLabel}>{s.label || `Session ${idx + 1}`}</Text>
+                          <View style={styles.sessionTimes}>
+                            <View style={styles.checkItem}>
+                              <Ionicons name="log-in-outline" size={12} color={hasIn ? colors.present : colors.border} />
+                              <Text style={[styles.checkItemValue, !hasIn && { color: colors.textMuted }]}>
+                                {hasIn ? fmtTime(s.clockIn) : '--:--'}
+                              </Text>
+                            </View>
+                            <Text style={styles.sessionDash}>–</Text>
+                            <View style={styles.checkItem}>
+                              <Ionicons name="log-out-outline" size={12} color={hasOut ? colors.absent : colors.border} />
+                              <Text style={[styles.checkItemValue, !hasOut && { color: colors.textMuted }]}>
+                                {hasOut ? fmtTime(s.clockOut) : isOpen ? 'ongoing' : '--:--'}
+                              </Text>
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })}
                   </View>
-                  {todayRecord?.checkOut && (
+                ) : (
+                  /* ── Standard single-pair ── */
+                  <View style={styles.checkTimesRow}>
                     <View style={styles.checkItem}>
-                      <Ionicons name="log-out-outline" size={14} color={colors.absent} />
-                      <Text style={styles.checkItemLabel}>Out</Text>
-                      <Text style={styles.checkItemValue}>{fmtTime(todayRecord.checkOut)}</Text>
+                      <Ionicons name="log-in-outline" size={14} color={colors.present} />
+                      <Text style={styles.checkItemLabel}>In</Text>
+                      <Text style={styles.checkItemValue}>{fmtTime(todayRecord.checkIn)}</Text>
                     </View>
-                  )}
-                </View>
+                    {todayRecord?.checkOut && (
+                      <View style={styles.checkItem}>
+                        <Ionicons name="log-out-outline" size={14} color={colors.absent} />
+                        <Text style={styles.checkItemLabel}>Out</Text>
+                        <Text style={styles.checkItemValue}>{fmtTime(todayRecord.checkOut)}</Text>
+                      </View>
+                    )}
+                  </View>
+                )
               ) : (
                 <View style={styles.clockRow}>
                   <Text style={styles.clockNum}>--</Text>
@@ -747,14 +882,36 @@ export default function AttendanceScreen() {
                       <Text style={styles.listDateText}>{date}</Text>
                     </View>
                     <View style={styles.listTimes}>
-                      <View style={styles.listTimeRow}>
-                        <Ionicons name="log-in-outline" size={13} color={colors.present} />
-                        <Text style={styles.listTimeText}>{fmtTime(item.checkIn) || '--'}</Text>
-                      </View>
-                      <View style={styles.listTimeRow}>
-                        <Ionicons name="log-out-outline" size={13} color={colors.absent} />
-                        <Text style={styles.listTimeText}>{fmtTime(item.checkOut) || '--'}</Text>
-                      </View>
+                      {item.sessions?.length >= 1 ? (
+                        item.sessions.map((s, si) => (
+                          <View key={s.sessionId ?? si} style={styles.listSessionRow}>
+                            <View style={[styles.listSessionDot, {
+                              backgroundColor: s.clockIn ? (s.clockOut ? colors.present : colors.late) : colors.border,
+                            }]} />
+                            {s.label ? <Text style={styles.listSessionLabel}>{s.label}</Text> : null}
+                            <View style={styles.listTimeRow}>
+                              <Ionicons name="log-in-outline" size={11} color={s.clockIn ? colors.present : colors.border} />
+                              <Text style={styles.listTimeText}>{s.clockIn ? fmtTime(s.clockIn) : '--'}</Text>
+                            </View>
+                            <Text style={styles.listTimeSep}>–</Text>
+                            <View style={styles.listTimeRow}>
+                              <Ionicons name="log-out-outline" size={11} color={s.clockOut ? colors.absent : colors.border} />
+                              <Text style={styles.listTimeText}>{s.clockOut ? fmtTime(s.clockOut) : '--'}</Text>
+                            </View>
+                          </View>
+                        ))
+                      ) : (
+                        <>
+                          <View style={styles.listTimeRow}>
+                            <Ionicons name="log-in-outline" size={13} color={colors.present} />
+                            <Text style={styles.listTimeText}>{fmtTime(item.checkIn) || '--'}</Text>
+                          </View>
+                          <View style={styles.listTimeRow}>
+                            <Ionicons name="log-out-outline" size={13} color={colors.absent} />
+                            <Text style={styles.listTimeText}>{fmtTime(item.checkOut) || '--'}</Text>
+                          </View>
+                        </>
+                      )}
                     </View>
                     <View style={[styles.statusBadge, { backgroundColor: (STATUS_COLORS[item.status] ?? colors.textMuted) + '20' }]}>
                       <Text style={[styles.statusText, { color: STATUS_COLORS[item.status] ?? colors.textMuted }]}>
@@ -941,7 +1098,7 @@ const styles = StyleSheet.create({
   emptyText:  { fontSize: 13, color: colors.textMuted, textAlign: 'center' },
 
   listItem: {
-    flexDirection: 'row', alignItems: 'center',
+    flexDirection: 'row', alignItems: 'flex-start',
     backgroundColor: colors.white,
     borderRadius: radius.lg,
     padding: spacing.md,
@@ -955,5 +1112,23 @@ const styles = StyleSheet.create({
   listTimes:    { flex: 1, gap: 4 },
   listTimeRow:  { flexDirection: 'row', alignItems: 'center', gap: 4 },
   listTimeText: { fontSize: 12, color: colors.textSecondary },
+  listTimeSep:  { fontSize: 11, color: colors.textMuted, marginHorizontal: 2 },
+  listSessionRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 },
+  listSessionDot: { width: 6, height: 6, borderRadius: 3 },
+  listSessionLabel: { fontSize: 10, color: colors.textMuted, width: 62, fontWeight: '600' },
   statusText:   { fontSize: 11, fontWeight: '700' },
+
+  // ── Multi-session (split shift) styles ──
+  sessionsContainer: { width: '100%', gap: 8, marginBottom: spacing.sm },
+  sessionRow: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border + '60',
+  },
+  sessionDot: { width: 8, height: 8, borderRadius: 4 },
+  sessionLabel: { fontSize: 11, fontWeight: '700', color: colors.textSecondary, width: 72 },
+  sessionTimes: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 4 },
+  sessionDash: { fontSize: 11, color: colors.textMuted, marginHorizontal: 2 },
 });

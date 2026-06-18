@@ -20,6 +20,9 @@ function normalizeRecord(r) {
     date:       r.date ?? r.attendanceDate ?? r.attendance_date ?? r.day ?? '',
     checkIn:    r.checkIn    ?? r.check_in  ?? r.timeIn  ?? r.time_in  ?? r.clockIn  ?? r.clock_in  ?? null,
     checkOut:   r.checkOut   ?? r.check_out ?? r.timeOut ?? r.time_out ?? r.clockOut ?? r.clock_out ?? null,
+    // Preserve split-shift session punches so the dashboard time card can
+    // render Morning / Afternoon / Evening rows instead of a single pair.
+    sessions:   Array.isArray(r.sessions) ? r.sessions : [],
     status:     (r.status ?? '').toString().toLowerCase(),
     hours:      r.hours      ?? r.hoursWorked ?? r.hours_worked ?? null,
   };
@@ -382,20 +385,52 @@ export default function DashboardScreen() {
             </View>
 
             {todayRecord?.checkIn ? (
-              <View style={styles.checkTimesRow}>
-                <View style={styles.checkTimeItem}>
-                  <Ionicons name="log-in-outline" size={13} color={colors.present} />
-                  <Text style={styles.checkTimeLabel}>In  </Text>
-                  <Text style={styles.checkTimeValue}>{fmtTime(todayRecord.checkIn)}</Text>
+              todayRecord.sessions?.length >= 1 ? (
+                /* ── Split shift: one row per session ── */
+                <View style={styles.sessionsContainer}>
+                  {todayRecord.sessions.map((s, idx) => {
+                    const hasIn  = !!s.clockIn;
+                    const hasOut = !!s.clockOut;
+                    const isOpen = hasIn && !hasOut;
+                    return (
+                      <View key={s.sessionId ?? idx} style={styles.sessionRow}>
+                        <View style={[
+                          styles.sessionDot,
+                          { backgroundColor: hasIn ? (isOpen ? colors.late : colors.present) : colors.border },
+                        ]} />
+                        <Text style={styles.sessionLabel}>{s.label || `Session ${idx + 1}`}</Text>
+                        <View style={styles.sessionTimes}>
+                          <Ionicons name="log-in-outline" size={11} color={hasIn ? colors.present : colors.border} />
+                          <Text style={[styles.sessionTime, !hasIn && styles.sessionTimeMuted]}>
+                            {hasIn ? fmtTime(s.clockIn) : '--:--'}
+                          </Text>
+                          <Text style={styles.sessionDash}>–</Text>
+                          <Ionicons name="log-out-outline" size={11} color={hasOut ? colors.absent : colors.border} />
+                          <Text style={[styles.sessionTime, !hasOut && styles.sessionTimeMuted]}>
+                            {hasOut ? fmtTime(s.clockOut) : isOpen ? 'ongoing' : '--:--'}
+                          </Text>
+                        </View>
+                      </View>
+                    );
+                  })}
                 </View>
-                {todayRecord?.checkOut ? (
+              ) : (
+                /* ── Standard single pair ── */
+                <View style={styles.checkTimesRow}>
                   <View style={styles.checkTimeItem}>
-                    <Ionicons name="log-out-outline" size={13} color={colors.absent} />
-                    <Text style={styles.checkTimeLabel}>Out  </Text>
-                    <Text style={styles.checkTimeValue}>{fmtTime(todayRecord.checkOut)}</Text>
+                    <Ionicons name="log-in-outline" size={13} color={colors.present} />
+                    <Text style={styles.checkTimeLabel}>In  </Text>
+                    <Text style={styles.checkTimeValue}>{fmtTime(todayRecord.checkIn)}</Text>
                   </View>
-                ) : null}
-              </View>
+                  {todayRecord?.checkOut ? (
+                    <View style={styles.checkTimeItem}>
+                      <Ionicons name="log-out-outline" size={13} color={colors.absent} />
+                      <Text style={styles.checkTimeLabel}>Out  </Text>
+                      <Text style={styles.checkTimeValue}>{fmtTime(todayRecord.checkOut)}</Text>
+                    </View>
+                  ) : null}
+                </View>
+              )
             ) : null}
 
             {!!address && (
@@ -580,6 +615,27 @@ const styles = StyleSheet.create({
   checkTimeItem:  { flexDirection: 'row', alignItems: 'center', gap: 4 },
   checkTimeLabel: { fontSize: 12, color: colors.textMuted },
   checkTimeValue: { fontSize: 12, fontWeight: '700', color: colors.text },
+
+  // Split-shift session rows inside the time card
+  sessionsContainer: {
+    width: '100%',
+    marginBottom: spacing.sm,
+    gap: 0,
+  },
+  sessionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 5,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border + '50',
+  },
+  sessionDot:       { width: 7, height: 7, borderRadius: 3.5 },
+  sessionLabel:     { fontSize: 11, fontWeight: '700', color: colors.textSecondary, width: 70 },
+  sessionTimes:     { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 3 },
+  sessionTime:      { fontSize: 11, fontWeight: '600', color: colors.text },
+  sessionTimeMuted: { color: colors.textMuted },
+  sessionDash:      { fontSize: 11, color: colors.textMuted, marginHorizontal: 1 },
 
   locationRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: spacing.md },
   locationText: {

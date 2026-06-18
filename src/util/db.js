@@ -121,6 +121,31 @@ export async function putSubscription(state) {
   if (error) throw error;
 }
 
+// ── Attendance Records (column-only read/write) ──────────────────────────────
+// Patches only the attendance_records column instead of the whole row, so a
+// clock-in from this app never clobbers other fields (departments, shifts,
+// settings, etc.) that may have been edited on the web app a moment earlier.
+export async function getAttendanceRecords(subscriptionId) {
+  const { data, error } = await supabase
+    .from('subscriptions')
+    .select('attendance_records')
+    .eq('subscription_id', subscriptionId)
+    .single();
+  if (error) return null;
+  return (data.attendance_records ?? []).map(r => ({
+    ...r,
+    employeeId: r.employeeId != null ? String(r.employeeId) : r.employeeId,
+  }));
+}
+
+export async function putAttendanceRecords(subscriptionId, records) {
+  const { error } = await supabase
+    .from('subscriptions')
+    .update({ attendance_records: records })
+    .eq('subscription_id', subscriptionId);
+  if (error) throw error;
+}
+
 // ── Pending Registrations helpers ─────────────────────────────────────────────
 
 export async function getPendingRegistrations(subscriptionId) {
