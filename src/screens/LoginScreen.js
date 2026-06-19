@@ -9,8 +9,6 @@ import { Ionicons } from '@expo/vector-icons';
 
 const logo = require('../assets/logo.png');
 import { colors, spacing, radius } from '../theme';
-import { getSubscription } from '../util/db';
-import { supabase } from '../util/supabase';
 import { useAuth } from '../context/AuthContext';
 
 // ── Deactivated Account Modal ─────────────────────────────────────────────────
@@ -61,7 +59,7 @@ function DeactivatedModal({ visible, onClose }) {
 
 // ── Login Screen ──────────────────────────────────────────────────────────────
 export default function LoginScreen() {
-  const [id, setId] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -69,82 +67,28 @@ export default function LoginScreen() {
   const { login } = useAuth();
 
   const handleSignIn = async () => {
-    const trimmedId = id.trim();
+    const trimmedEmail = email.trim();
     const trimmedPassword = password.trim();
 
-    if (!trimmedId || !trimmedPassword) {
-      Alert.alert('Missing Fields', 'Please enter your ID and password.');
+    if (!trimmedEmail || !trimmedPassword) {
+      Alert.alert('Missing Fields', 'Please enter your email and password.');
       return;
     }
 
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('accounts')
-        .select('*')
-        .eq('id', trimmedId)
-        .single();
-
-      if (error || !data) {
-        Alert.alert('Login Failed', 'Account not found. Please check your ID.');
-        setLoading(false);
-        return;
-      }
-
-      if (data.password !== trimmedPassword) {
-        Alert.alert('Login Failed', 'Incorrect password.');
-        setLoading(false);
-        return;
-      }
-
-      // ── Inactive / deactivated check ──────────────────────────────────
-      const accountStatus = (data.status ?? 'active').toString().toLowerCase().trim();
-      if (accountStatus === 'inactive' || accountStatus === 'deactivated' || accountStatus === 'disabled') {
-        setLoading(false);
-        setShowDeactivated(true);
-        return;
-      }
-
-      const account = {
-        email:          data.email,
-        password:       data.password,
-        role:           data.role,
-        name:           data.name,
-        id:             data.id,
-        employeeId:     data.employee_id,
-        subscriptionId: data.subscription_id,
-        createdAt:      data.created_at,
-        status:         data.status,
-      };
-
-      let subscription = null;
-      if (account.subscriptionId) {
-        subscription = await getSubscription(account.subscriptionId);
-      }
-
-      // ── Enrolled-employee status check ────────────────────────────────
-      if (subscription && account.employeeId) {
-        const empId = String(account.employeeId).trim();
-        const enrolledEmp = (subscription.enrolledEmployees ?? []).find(e => {
-          const byId           = String(e.id               ?? '').trim();
-          const byAccountEmpId = String(e.accountEmployeeId ?? '').trim();
-          const byEmployeeId   = String(e.employeeId       ?? e.employee_id ?? '').trim();
-          return byId === empId || byAccountEmpId === empId || byEmployeeId === empId;
-        });
-
-        if (enrolledEmp) {
-          const empStatus = (enrolledEmp.status ?? 'active').toString().toLowerCase().trim();
-          if (empStatus === 'inactive' || empStatus === 'deactivated' || empStatus === 'disabled') {
-            setLoading(false);
-            setShowDeactivated(true);
-            return;
-          }
-        }
-      }
-
-      login(account, subscription);
+      // AuthContext.login() handles the Supabase Auth sign-in, profile fetch,
+      // subscription fetch, and the deactivated-employee check all in one go.
+      await login(trimmedEmail, trimmedPassword);
     } catch (err) {
-      Alert.alert('Error', err.message || 'Something went wrong. Please try again.');
+      const message = err?.message || '';
+      if (message.toLowerCase().includes('no longer active')) {
+        setShowDeactivated(true);
+      } else if (message.toLowerCase().includes('invalid email or password')) {
+        Alert.alert('Login Failed', 'Incorrect email or password.');
+      } else {
+        Alert.alert('Error', message || 'Something went wrong. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
@@ -194,15 +138,16 @@ export default function LoginScreen() {
 
               <View style={styles.inputGroup}>
                 <View style={styles.inputWrapper}>
-                  <Ionicons name="person-outline" size={18} color={colors.textMuted} style={styles.inputIcon} />
+                  <Ionicons name="mail-outline" size={18} color={colors.textMuted} style={styles.inputIcon} />
                   <TextInput
                     style={styles.input}
-                    placeholder="Enter your ID / username"
+                    placeholder="Enter your email"
                     placeholderTextColor={colors.textMuted}
-                    value={id}
-                    onChangeText={setId}
+                    value={email}
+                    onChangeText={setEmail}
                     autoCapitalize="none"
                     autoCorrect={false}
+                    keyboardType="email-address"
                     returnKeyType="next"
                   />
                 </View>

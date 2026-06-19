@@ -1,38 +1,70 @@
 import { supabase } from './supabase';
 
 // ── Account helpers ──────────────────────────────────────────────────────────
+// NOTE: Passwords are managed exclusively by Supabase Auth now. The `accounts`
+// table stores profile metadata only (role, name, employee_id, subscription_id,
+// auth_uid) — there is no password column to read or write here.
 
-export async function getAccount(email) {
+/**
+ * Fetch a profile row by Supabase Auth UUID (`auth_uid`).
+ * This is the lookup used right after `supabase.auth.signInWithPassword`,
+ * since at that point we only have the Auth user's id, not their email.
+ */
+export async function getAccountByAuthUid(authUid) {
   const { data, error } = await supabase
     .from('accounts')
-    .select('*')
-    .eq('email', email)
-    .single();
-  if (error) return null;
+    .select('auth_uid, email, role, name, employee_id, subscription_id, created_at')
+    .eq('auth_uid', authUid)
+    .maybeSingle();
+  if (error || !data) return null;
   return {
+    id:             data.auth_uid,
     email:          data.email,
-    password:       data.password,
     role:           data.role,
     name:           data.name,
-    id:             data.id,
     employeeId:     data.employee_id,
     subscriptionId: data.subscription_id,
     createdAt:      data.created_at,
   };
 }
 
+/**
+ * Fetch a profile row by email. Kept for legacy/lookup callers — prefer
+ * getAccountByAuthUid() during the actual login flow.
+ */
+export async function getAccount(email) {
+  const { data, error } = await supabase
+    .from('accounts')
+    .select('auth_uid, email, role, name, employee_id, subscription_id, created_at')
+    .eq('email', email)
+    .maybeSingle();
+  if (error || !data) return null;
+  return {
+    id:             data.auth_uid,
+    email:          data.email,
+    role:           data.role,
+    name:           data.name,
+    employeeId:     data.employee_id,
+    subscriptionId: data.subscription_id,
+    createdAt:      data.created_at,
+  };
+}
+
+/**
+ * Upsert a profile row in `accounts`. Does NOT touch Supabase Auth —
+ * `account.id` must already be the Supabase Auth UUID (auth_uid).
+ */
 export async function putAccount(account) {
   const { error } = await supabase
     .from('accounts')
     .upsert({
+      auth_uid:        account.id,
       email:           account.email,
-      password:        account.password,
       role:            account.role,
       name:            account.name,
-      id:              account.id,
       employee_id:     account.employeeId     ?? null,
       subscription_id: account.subscriptionId ?? null,
-    });
+    }, { onConflict: 'auth_uid' });
   if (error) throw error;
 }
 
@@ -296,54 +328,8 @@ export async function deleteAnnouncement(id) {
   if (error) throw error;
 }
 
-// ── Employee Mobile Account helpers ──────────────────────────────────────────
-
-export async function createEmployeeAccount({ employeeId, subscriptionId, name, email, username, password }) {
-  const { data: existing } = await supabase
-    .from('accounts')
-    .select('id')
-    .eq('id', username)
-    .maybeSingle();
-  if (existing) throw new Error(`Username "${username}" is already taken.`);
-
-  const { error } = await supabase
-    .from('accounts')
-    .insert({
-      id:              username,
-      email:           email,
-      password:        password,
-      role:            'employee',
-      name:            name,
-      employee_id:     employeeId,
-      subscription_id: subscriptionId,
-    });
-  if (error) throw new Error(error.message);
-}
-
-export async function updateEmployeeAccount(employeeId, { username, password, name, email }) {
-  const updates = {};
-  if (name)     updates.name     = name;
-  if (email)    updates.email    = email;
-  if (password) updates.password = password;
-  if (username) updates.id = username;
-
-  if (Object.keys(updates).length === 0) return;
-
-  const { error } = await supabase
-    .from('accounts')
-    .update(updates)
-    .eq('employee_id', employeeId)
-    .eq('role', 'employee');
-  if (error) throw new Error(error.message);
-}
-
-export async function getEmployeeAccount(employeeId) {
-  const { data, error } = await supabase
-    .from('accounts')
-    .select('id, email, name')
-    .eq('employee_id', employeeId)
-    .eq('role', 'employee')
-    .maybeSingle();
-  if (error || !data) return null;
-  return { username: data.id, email: data.email, name: data.name };
-}
+// NOTE: Employee Supabase Auth accounts (signUp + accounts row insert/update)
+// are created and managed from the web admin app — see src_foreference's
+// createEmployeeAccount/updateEmployeeAccount. This mobile app only ever
+// signs employees IN (supabase.auth.signInWithPassword), so those
+// admin-only helpers were removed here rather than ported.

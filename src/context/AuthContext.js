@@ -3,11 +3,30 @@ import {
   Modal, View, Text, TouchableOpacity, StyleSheet,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getSubscription } from '../util/db';
+import { supabase } from '../util/supabase';
+import { getAccountByAuthUid, getSubscription } from '../util/db';
 
 const AuthContext = createContext(null);
 
 const POLL_INTERVAL_MS = 30_000; // check every 30 s
+
+function isDeactivatedStatus(status) {
+  const s = (status ?? 'active').toString().toLowerCase().trim();
+  return s === 'inactive' || s === 'deactivated' || s === 'disabled';
+}
+
+// Find the enrolledEmployees[] entry that matches this account's employeeId.
+// Mirrors the matching logic used elsewhere (Dashboard/Attendance/Leave screens).
+function findEnrolledEmployee(subscription, employeeId) {
+  if (!subscription || !employeeId) return null;
+  const empId = String(employeeId).trim();
+  return (subscription.enrolledEmployees ?? []).find(e => {
+    const byId           = String(e.id               ?? '').trim();
+    const byAccountEmpId = String(e.accountEmployeeId ?? '').trim();
+    const byEmployeeId   = String(e.employeeId       ?? e.employee_id ?? '').trim();
+    return byId === empId || byAccountEmpId === empId || byEmployeeId === empId;
+  });
+}
 
 // ── Deactivated-while-logged-in modal ────────────────────────────────────────
 function ForcedLogoutModal({ visible, onLogout }) {
@@ -59,27 +78,130 @@ function ForcedLogoutModal({ visible, onLogout }) {
 export function AuthProvider({ children }) {
   const [account,      setAccount]      = useState(null);
   const [subscription, setSubscription] = useState(null);
+  const [authReady,    setAuthReady]    = useState(false);
   const [showForced,   setShowForced]   = useState(false);
 
   const pollRef = useRef(null);
 
-  const login = (accountData, subscriptionData) => {
-    setAccount(accountData);
-    setSubscription(subscriptionData);
-    setShowForced(false);
-  };
+  // Guards against onAuthStateChange's SIGNED_IN firing a second, redundant
+  // hydrate right after login() already did one (signInWithPassword itself
+  // triggers SIGNED_IN).
+  const hydratingRef = useRef(false);
 
-  const logout = useCallback(() => {
+  // ── Sign out of Supabase + clear local state ────────────────────────────
+  const clearSession = useCallback(async () => {
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
+    try {
+      await supabase.auth.signOut();
+    } catch (_) {
+      // ignore — we're clearing local state regardless
+    }
     setAccount(null);
     setSubscription(null);
-    setShowForced(false);
   }, []);
 
-  // ── Status checker ──────────────────────────────────────────────────────
+  // ── Given a Supabase Auth user, load profile + subscription, run the
+  //    deactivation checks, and update state. Returns the profile on success,
+  //    or null if the account/employee is deactivated or has no profile row. ──
+  const hydrateFromAuthUser = useCallback(async (authUser) => {
+    hydratingRef.current = true;
+    try {
+      const profile = await getAccountByAuthUid(authUser.id);
+      if (!profile) {
+        await clearSession();
+        return null;
+      }
+
+      let sub = null;
+      if (profile.subscriptionId) {
+        sub = await getSubscription(profile.subscriptionId);
+      }
+
+      const enrolledEmp = findEnrolledEmployee(sub, profile.employeeId);
+      if (enrolledEmp && isDeactivatedStatus(enrolledEmp.status)) {
+        await clearSession();
+        setShowForced(true);
+        return null;
+      }
+
+      setAccount(profile);
+      setSubscription(sub);
+      setShowForced(false);
+      return profile;
+    } finally {
+      hydratingRef.current = false;
+    }
+  }, [clearSession]);
+
+  // ── login(email, password) — sign in via Supabase Auth, then hydrate ───
+  const login = useCallback(async (email, password) => {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email:    email.trim(),
+      password: password.trim(),
+    });
+
+    if (error) {
+      throw new Error('Invalid email or password.');
+    }
+
+    const profile = await hydrateFromAuthUser(data.user);
+    if (!profile) {
+      // hydrateFromAuthUser already signed out (and, if relevant, surfaced
+      // the ForcedLogoutModal) — give the caller a message to show instead.
+      throw new Error('This account is no longer active. Please contact your HR Department.');
+    }
+
+    return profile;
+  }, [hydrateFromAuthUser]);
+
+  const logout = useCallback(async () => {
+    await clearSession();
+    setShowForced(false);
+  }, [clearSession]);
+
+  // ── Bootstrap: restore session on mount + listen for auth changes ──────
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!mounted) return;
+      if (session?.user) {
+        await hydrateFromAuthUser(session.user);
+      }
+      setAuthReady(true);
+    })();
+
+    const { data: { subscription: authSub } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (!mounted) return;
+
+        if (event === 'SIGNED_OUT' || !session?.user) {
+          setAccount(null);
+          setSubscription(null);
+          setAuthReady(true);
+        } else if (event === 'TOKEN_REFRESHED') {
+          // Silently refresh the profile/subscription when the JWT renews.
+          hydrateFromAuthUser(session.user);
+        } else if (event === 'SIGNED_IN' && !hydratingRef.current) {
+          // Covers cold-start session restores; login() already handles its
+          // own hydrate, so hydratingRef avoids doing it twice in a row.
+          await hydrateFromAuthUser(session.user);
+          setAuthReady(true);
+        }
+      },
+    );
+
+    return () => {
+      mounted = false;
+      authSub.unsubscribe();
+    };
+  }, [hydrateFromAuthUser]);
+
+  // ── Status checker (periodic re-check while logged in) ──────────────────
   const checkStatus = useCallback(async (currentAccount) => {
     if (!currentAccount?.subscriptionId || !currentAccount?.employeeId) return;
 
@@ -87,28 +209,17 @@ export function AuthProvider({ children }) {
       const sub = await getSubscription(currentAccount.subscriptionId);
       if (!sub) return;
 
-      const empId = String(currentAccount.employeeId).trim();
-      const emp = (sub.enrolledEmployees ?? []).find(e => {
-        const byId           = String(e.id               ?? '').trim();
-        const byAccountEmpId = String(e.accountEmployeeId ?? '').trim();
-        const byEmployeeId   = String(e.employeeId       ?? e.employee_id ?? '').trim();
-        return byId === empId || byAccountEmpId === empId || byEmployeeId === empId;
-      });
-
+      const emp = findEnrolledEmployee(sub, currentAccount.employeeId);
       if (!emp) return;
 
-      const status = (emp.status ?? 'active').toString().toLowerCase().trim();
-      if (status === 'inactive' || status === 'deactivated' || status === 'disabled') {
-        if (pollRef.current) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
-        }
+      if (isDeactivatedStatus(emp.status)) {
+        await clearSession();
         setShowForced(true);
       }
     } catch (_) {
       // network hiccup — silently ignore, will retry next interval
     }
-  }, []);
+  }, [clearSession]);
 
   // ── Start / stop polling whenever account changes ───────────────────────
   useEffect(() => {
@@ -136,7 +247,7 @@ export function AuthProvider({ children }) {
   }, [account, checkStatus]);
 
   return (
-    <AuthContext.Provider value={{ account, subscription, login, logout, setSubscription }}>
+    <AuthContext.Provider value={{ account, subscription, authReady, login, logout, setSubscription }}>
       {children}
 
       {/* Overlays everything — rendered inside the provider so it always shows */}
